@@ -1,6 +1,6 @@
 """
 eToro AI Trading Agent
-Dynamically selects strategy based on market conditions using Claude AI.
+Uses correct eToro API endpoints based on official documentation.
 """
 
 import os
@@ -25,18 +25,14 @@ log = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 ETORO_BASE      = "https://public-api.etoro.com/api/v1"
-ETORO_API_KEY   = os.environ["ETORO_API_KEY"]    # x-api-key
-ETORO_USER_KEY  = os.environ["ETORO_USER_KEY"]   # x-user-key
+ETORO_API_KEY   = os.environ["ETORO_API_KEY"]
+ETORO_USER_KEY  = os.environ["ETORO_USER_KEY"]
 ANTHROPIC_KEY   = os.environ["ANTHROPIC_API_KEY"]
 
-# Trading limits – edit to match your risk appetite
-MAX_POSITION_PCT   = 0.10   # max 10% of portfolio per stock
-MIN_TRADE_AMOUNT   = 50     # USD
-RUN_INTERVAL_SECS  = 3600   # run every hour
-WATCHLIST          = [      # tickers to track
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-    "TSLA", "META", "JPM", "V", "UNH"
-]
+MAX_POSITION_PCT   = 0.10
+MIN_TRADE_AMOUNT   = 50
+RUN_INTERVAL_SECS  = 3600
+WATCHLIST = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", "UNH"]
 
 # ── eToro API helpers ────────────────────────────────────────────────────────
 
@@ -63,24 +59,47 @@ def etoro_post(path: str, body: dict) -> dict:
     return r.json()
 
 
-# ── Portfolio helpers ────────────────────────────────────────────────────────
+# ── Portfolio helpers (correct eToro endpoints) ──────────────────────────────
 
 def get_portfolio() -> dict:
-    """Return current positions and cash balance."""
-    return etoro_get("/portfolio")
+    """Fetch P&L data from the real trading account."""
+    return etoro_get("/trading/info/real/pnl")
 
 
-def get_available_cash(portfolio: dict) -> float:
-    """Calculate free cash from portfolio data."""
-    return float(portfolio.get("availableCash", 0))
+def get_available_cash(pnl: dict) -> float:
+    """
+    Calculate available cash per eToro docs:
+    credit - (sum of manual ordersForOpen amounts + sum of orders amounts)
+    """
+    credit = float(pnl.get("credit", 0))
+    orders_for_open = pnl.get("ordersForOpen", [])
+    orders = pnl.get("orders", [])
+
+    manual_pending = sum(
+        float(o.get("amount", 0))
+        for o in orders_for_open
+        if o.get("mirrorId", 0) == 0
+    )
+    limit_orders = sum(float(o.get("amount", 0)) for o in orders)
+
+    return credit - (manual_pending + limit_orders)
 
 
-def get_open_positions(portfolio: dict) -> list[dict]:
-    """Extract open equity positions."""
-    return [
-        p for p in portfolio.get("positions", [])
-        if p.get("isBuy") and p.get("positionType") == "Stock"
-    ]
+def get_open_positions(pnl: dict) -> list[dict]:
+    """Extract open stock positions from P&L data."""
+    positions = pnl.get("positions", [])
+    return [p for p in positions if p.get("isBuy") is True]
+
+
+def get_total_equity(pnl: dict) -> float:
+    """
+    Equity = credit + sum of position profits
+    """
+    credit = float(pnl.get("credit", 0))
+    positions = pnl.get("positions", [])
+    unrealised_pl = sum(float(p.get("profit", 0)) for p in positions)
+    invested = sum(float(p.get("amount", 0)) for p in positions)
+    return credit + invested + unrealised_pl
 
 
 def get_instrument_id(ticker: str) -> Optional[int]:
@@ -107,31 +126,27 @@ def get_market_data(ticker: str) -> dict:
         return {}
 
 
-# ── Trade execution ─────────────────────────────────────────────────────────
+# ── Trade execution ──────────────────────────────────────────────────────────
 
 def open_position(instrument_id: int, amount_usd: float, is_buy: bool = True) -> dict:
-    """Open a market order by dollar amount."""
     body = {
         "InstrumentId": instrument_id,
         "Amount": round(amount_usd, 2),
         "Leverage": 1,
         "IsBuy": is_buy,
     }
-    log.info(f"{'BUY' if is_buy else 'SELL'} {amount_usd:.2f} USD of instrument {instrument_id}")
+    log.info(f"{'BUY' if is_buy else 'SELL'} ${amount_usd:.2f} of instrument {instrument_id}")
     return etoro_post("/trading/execution/market-open-orders/by-amount", body)
 
 
-def close_position(position_id: int, units: Optional[float] = None) -> dict:
-    """Close a position fully or partially."""
-    body = {"UnitsToDeduct": units}  # None = full close
-    log.info(f"CLOSE position {position_id}" + (f" ({units} units)" if units else " (full)"))
-    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", body)
+def close_position(position_id: int) -> dict:
+    log.info(f"CLOSE position {position_id}")
+    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", {})
 
 
 # ── AI decision engine ───────────────────────────────────────────────────────
 
-def build_market_snapshot(portfolio: dict) -> dict:
-    """Gather market data for the watchlist."""
+def build_market_snapshot(pnl: dict) -> dict:
     snapshot = {}
     for ticker in WATCHLIST:
         data = get_market_data(ticker)
@@ -175,19 +190,17 @@ Rules:
 - Never allocate more than 10% of portfolio equity to a single stock
 - Always keep at least 15% in cash as a buffer
 - Only trade stocks in the provided watchlist
-- For sells/closes, reference ticker symbols only (positions will be looked up)
 - If no action is warranted, return an empty actions array
 - Be concise but specific in your reasoning
 """
 
 
-def ask_claude(portfolio: dict, market_data: dict) -> dict:
-    """Send portfolio state to Claude and get back trading decisions."""
+def ask_claude(pnl: dict, market_data: dict) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-    positions = get_open_positions(portfolio)
-    cash      = get_available_cash(portfolio)
-    equity    = float(portfolio.get("totalEquity", cash))
+    positions = get_open_positions(pnl)
+    cash      = get_available_cash(pnl)
+    equity    = get_total_equity(pnl)
 
     user_msg = f"""
 Current time: {datetime.now(timezone.utc).isoformat()}
@@ -195,7 +208,7 @@ Current time: {datetime.now(timezone.utc).isoformat()}
 === PORTFOLIO STATE ===
 Available Cash: ${cash:,.2f}
 Total Equity:   ${equity:,.2f}
-Cash Buffer:    {(cash/equity*100):.1f}%
+Cash Buffer:    {(cash/equity*100 if equity else 0):.1f}%
 
 Open Positions ({len(positions)}):
 {json.dumps(positions, indent=2)}
@@ -203,8 +216,7 @@ Open Positions ({len(positions)}):
 === MARKET DATA ===
 {json.dumps(market_data, indent=2)}
 
-Based on this data, decide what actions to take. Remember to stay within the risk rules.
-Return ONLY valid JSON.
+Based on this data, decide what actions to take. Return ONLY valid JSON.
 """
 
     response = client.messages.create(
@@ -215,7 +227,6 @@ Return ONLY valid JSON.
     )
 
     raw = response.content[0].text.strip()
-    # Strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -225,23 +236,20 @@ Return ONLY valid JSON.
 
 # ── Action executor ──────────────────────────────────────────────────────────
 
-def execute_actions(decisions: dict, portfolio: dict, equity: float) -> list[dict]:
-    """Execute the trades Claude decided on."""
+def execute_actions(decisions: dict, pnl: dict, equity: float) -> list[dict]:
     results = []
     positions_by_ticker = {
         p.get("instrumentName", "").upper(): p
-        for p in get_open_positions(portfolio)
+        for p in get_open_positions(pnl)
     }
 
     for action in decisions.get("actions", []):
-        ticker     = action["action"].upper() if "ticker" not in action else action["ticker"].upper()
-        act_type   = action["action"].lower()
+        ticker    = action.get("ticker", "").upper()
+        act_type  = action["action"].lower()
         amount_usd = action.get("amount_usd", 0)
-        ticker     = action.get("ticker", "").upper()
 
         try:
             if act_type == "buy":
-                # Safety: cap at MAX_POSITION_PCT of equity
                 max_allowed = equity * MAX_POSITION_PCT
                 safe_amount = min(amount_usd, max_allowed)
                 if safe_amount < MIN_TRADE_AMOUNT:
@@ -251,7 +259,7 @@ def execute_actions(decisions: dict, portfolio: dict, equity: float) -> list[dic
                 if not iid:
                     log.warning(f"Skipping BUY {ticker}: could not resolve instrument ID")
                     continue
-                result = open_position(iid, safe_amount, is_buy=True)
+                result = open_position(iid, safe_amount)
                 results.append({"action": "buy", "ticker": ticker, "amount": safe_amount, "result": result})
 
             elif act_type in ("sell", "close"):
@@ -272,30 +280,31 @@ def execute_actions(decisions: dict, portfolio: dict, equity: float) -> list[dic
     return results
 
 
-# ── Run loop ─────────────────────────────────────────────────────────────────
+# ── Run loop ──────────────────────────────────────────────────────────────────
 
 def run_cycle():
     log.info("=" * 60)
     log.info("Starting trading cycle")
 
     try:
-        portfolio    = get_portfolio()
-        equity       = float(portfolio.get("totalEquity", 0))
-        market_data  = build_market_snapshot(portfolio)
+        pnl        = get_portfolio()
+        equity     = get_total_equity(pnl)
+        cash       = get_available_cash(pnl)
+        market_data = build_market_snapshot(pnl)
 
-        log.info(f"Portfolio equity: ${equity:,.2f} | Watching {len(market_data)} instruments")
+        log.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Watching {len(market_data)} instruments")
 
-        decisions = ask_claude(portfolio, market_data)
+        decisions = ask_claude(pnl, market_data)
         log.info(f"Strategy: {decisions.get('strategy')} | Risk: {decisions.get('risk_level')}")
         log.info(f"Rationale: {decisions.get('rationale')}")
         log.info(f"Actions planned: {len(decisions.get('actions', []))}")
 
-        results = execute_actions(decisions, portfolio, equity)
+        results = execute_actions(decisions, pnl, equity)
 
-        # Save cycle log
         cycle_log = {
             "timestamp":  datetime.now(timezone.utc).isoformat(),
             "equity":     equity,
+            "cash":       cash,
             "decisions":  decisions,
             "results":    results,
         }
