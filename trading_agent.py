@@ -63,7 +63,8 @@ def etoro_post(path: str, body: dict) -> dict:
 
 def get_portfolio() -> dict:
     """Fetch P&L data from the real trading account."""
-    return etoro_get("/trading/info/real/pnl")
+    data = etoro_get("/trading/info/real/pnl")
+    return data.get("clientPortfolio", data)
 
 
 def get_available_cash(pnl: dict) -> float:
