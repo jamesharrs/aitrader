@@ -577,6 +577,9 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
+// Auto-connect on load
+window.addEventListener("load", () => { connect(); refreshTimer = setInterval(loadAll, 10000); });
+
 // ── Connect ───────────────────────────────────────────────────────────────
 function connect() {
   API_URL = (document.getElementById('apiUrlInput').value || '').replace(/\/$/, '');
