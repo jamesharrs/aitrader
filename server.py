@@ -1,10 +1,11 @@
 """
 eToro Agent API Server
-Exposes endpoints for the dashboard to poll and for manual control.
+Serves the dashboard and exposes API endpoints.
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import json, os, threading, time
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ agent_state = {
     "running":      False,
     "last_cycle":   None,
     "cycle_count":  0,
-    "status":       "idle",   # idle | running | paused | error
+    "status":       "idle",
 }
 _cycle_thread: Optional[threading.Thread] = None
 
@@ -33,8 +34,29 @@ _cycle_thread: Optional[threading.Thread] = None
 # ── Models ───────────────────────────────────────────────────────────────────
 class ManualTradeRequest(BaseModel):
     ticker: str
-    action: str       # buy | close
+    action: str
     amount_usd: Optional[float] = None
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    """Serve the trading dashboard."""
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    try:
+        with open(html_path) as f:
+            content = f.read()
+        # Auto-set API URL to same origin so no manual connect needed
+        content = content.replace(
+            'value="http://localhost:8000"',
+            'value=""'
+        ).replace(
+            "API_URL = 'http://localhost:8000'",
+            "API_URL = window.location.origin"
+        )
+        return HTMLResponse(content=content)
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Dashboard not found</h1><p>index.html missing.</p>", status_code=404)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -71,7 +93,6 @@ def stop_agent():
 
 @app.post("/agent/run-now")
 def run_now(background_tasks: BackgroundTasks):
-    """Trigger an immediate cycle."""
     background_tasks.add_task(_single_cycle)
     return {"message": "Cycle triggered"}
 
@@ -94,7 +115,6 @@ def portfolio():
 
 @app.get("/cycles")
 def get_cycles(limit: int = 20):
-    """Return recent cycle logs."""
     cycles = []
     try:
         with open("cycle_log.jsonl") as f:
@@ -109,7 +129,6 @@ def get_cycles(limit: int = 20):
 
 @app.post("/trade/manual")
 def manual_trade(req: ManualTradeRequest):
-    """Execute a manual trade outside of the agent cycle."""
     from trading_agent import (
         get_instrument_id, open_position, close_position, get_portfolio, get_open_positions
     )
