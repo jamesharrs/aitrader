@@ -6,12 +6,10 @@ Exposes endpoints for the dashboard to poll and for manual control.
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import json, os, threading
+import json, os, threading, time
 from datetime import datetime, timezone
 from typing import Optional
-import sys
-sys.path.append("..")
-from agent.trading_agent import run_cycle, get_portfolio, get_available_cash, get_open_positions
+from trading_agent import run_cycle, get_portfolio, get_available_cash, get_open_positions
 
 app = FastAPI(title="eToro AI Agent API", version="1.0.0")
 
@@ -81,13 +79,13 @@ def run_now(background_tasks: BackgroundTasks):
 @app.get("/portfolio")
 def portfolio():
     try:
-        data     = get_portfolio()
-        cash     = get_available_cash(data)
+        data      = get_portfolio()
+        cash      = get_available_cash(data)
         positions = get_open_positions(data)
         return {
-            "cash":         cash,
-            "totalEquity":  data.get("totalEquity"),
-            "positions":    positions,
+            "cash":          cash,
+            "totalEquity":   data.get("totalEquity"),
+            "positions":     positions,
             "positionCount": len(positions),
         }
     except Exception as e:
@@ -112,7 +110,7 @@ def get_cycles(limit: int = 20):
 @app.post("/trade/manual")
 def manual_trade(req: ManualTradeRequest):
     """Execute a manual trade outside of the agent cycle."""
-    from agent.trading_agent import (
+    from trading_agent import (
         get_instrument_id, open_position, close_position, get_portfolio, get_open_positions
     )
     portfolio = get_portfolio()
@@ -138,10 +136,8 @@ def manual_trade(req: ManualTradeRequest):
 
 # ── Background tasks ─────────────────────────────────────────────────────────
 
-import time
-
 def _run_agent_loop():
-    from agent.trading_agent import RUN_INTERVAL_SECS
+    from trading_agent import RUN_INTERVAL_SECS
     while agent_state["running"]:
         _single_cycle()
         if agent_state["running"]:
