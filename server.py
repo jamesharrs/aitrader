@@ -105,7 +105,7 @@ def portfolio():
         positions = get_open_positions(data)
         return {
             "cash":          cash,
-            "totalEquity":   data.get("totalEquity"),
+            "totalEquity":   float(data.get("credit", 0)) + sum(float(p.get("amount", 0)) + float(p.get("profit", 0)) for p in data.get("positions", [])),
             "positions":     positions,
             "positionCount": len(positions),
         }

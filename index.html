@@ -444,7 +444,7 @@
 <div class="main">
 
   <!-- API config notice -->
-  <div class="config-bar" id="configBar">
+  <div class="config-bar" id="configBar" style="display:none">
     <div class="config-icon">⚙️</div>
     <div class="config-text">Enter your API server URL to connect the dashboard to your running agent.</div>
     <div class="config-inputs">
@@ -565,7 +565,7 @@
 </div><!-- /everything -->
 
 <script>
-let API_URL = 'http://localhost:8000';
+let API_URL = window.location.origin;
 let refreshTimer = null;
 
 // ── Clock ─────────────────────────────────────────────────────────────────
@@ -618,7 +618,7 @@ async function loadStatus() {
 async function loadPortfolio() {
   try {
     const d = await api('/portfolio');
-    const equity = parseFloat(d.totalEquity || 0);
+    const equity = parseFloat(d.totalEquity) || parseFloat(d.cash || 0);
     const cash   = parseFloat(d.cash || 0);
     document.getElementById('kpiEquity').textContent = '$' + equity.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
     document.getElementById('kpiCash').textContent   = '$' + cash.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
