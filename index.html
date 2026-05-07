@@ -671,21 +671,53 @@ function renderLog(cycles) {
     return;
   }
   el.innerHTML = cycles.map(c => {
-    const d = c.decisions || {};
+    const d  = c.decisions || {};
+    const pm = c.premarket_brief || {};
+    const overview  = (pm.market_overview  || {});
+    const approach  = (pm.trading_approach || {});
+    const pmStocks  = (pm.stocks           || {});
+
     const actions = (d.actions || []).map(a =>
       `<span class="log-action-pill ${a.action}">${a.action} ${a.ticker}</span>`
     ).join('');
     const stratClass = `strategy-${d.strategy || 'hold'}`;
+
+    // Pre-market section
+    let pmHtml = '';
+    if (overview.overall_summary) {
+      const sent = overview.futures_sentiment || 'neutral';
+      const sentColor = sent === 'bullish' ? 'var(--green)' : sent === 'bearish' ? 'var(--red)' : 'var(--amber)';
+      pmHtml = `
+        <div style="margin:8px 0;padding:8px 10px;background:rgba(255,255,255,.03);border-radius:6px;border-left:2px solid ${sentColor}">
+          <div style="font-size:10px;font-family:var(--mono);color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">
+            Pre-Market · S&P ${overview.sp500_futures_change_pct > 0 ? '+' : ''}${overview.sp500_futures_change_pct || '?'}% · Nasdaq ${overview.nasdaq_futures_change_pct > 0 ? '+' : ''}${overview.nasdaq_futures_change_pct || '?'}%
+            <span style="color:${sentColor};margin-left:8px">${sent.toUpperCase()}</span>
+          </div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:4px">${overview.overall_summary}</div>
+          ${approach.daily_thesis ? `<div style="font-size:11px;color:var(--blue);line-height:1.5">Thesis: ${approach.daily_thesis}</div>` : ''}
+          ${(approach.key_risks||[]).length ? `<div style="font-size:10px;color:var(--red);margin-top:4px">Risks: ${approach.key_risks.join(' · ')}</div>` : ''}
+        </div>`;
+    }
+
+    // Stock sentiment pills
+    const pmPills = Object.entries(pmStocks).map(([t, s]) => {
+      const col = s.sentiment === 'bullish' ? 'var(--green)' : s.sentiment === 'bearish' ? 'var(--red)' : 'var(--amber)';
+      const chg = s.premarket_change_pct || 0;
+      return `<span style="font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:3px;border:1px solid ${col};color:${col};opacity:.8">${t} ${chg > 0 ? '+' : ''}${chg.toFixed(1)}%</span>`;
+    }).join('');
+
     return `
       <div class="log-item">
         <div class="log-time">${new Date(c.timestamp).toLocaleTimeString()}</div>
         <div class="log-content">
-          <div class="log-strategy">
+          ${pmHtml}
+          <div class="log-strategy" style="margin-top:6px">
             <span class="strategy-badge ${stratClass}">${d.strategy || 'hold'}</span>
             &nbsp; Risk: <span style="color:var(--amber)">${d.risk_level||'—'}</span>
           </div>
           <div class="log-rationale">${d.rationale || 'No rationale provided.'}</div>
-          <div class="log-actions">${actions || '<span style="color:var(--muted);font-size:11px;font-family:var(--mono)">No trades</span>'}</div>
+          ${pmPills ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">${pmPills}</div>` : ''}
+          <div class="log-actions" style="margin-top:6px">${actions || '<span style="color:var(--muted);font-size:11px;font-family:var(--mono)">No trades</span>'}</div>
         </div>
       </div>`;
   }).join('');

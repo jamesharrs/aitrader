@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import requests
 import anthropic
+from premarket import build_premarket_brief, format_brief_for_claude
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,7 +198,7 @@ Rules:
 - If no action warranted, return empty actions array
 """
 
-def ask_claude(pnl: dict, market_data: dict) -> dict:
+def ask_claude(pnl: dict, market_data: dict, premarket_brief: str = "") -> dict:
     client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     cash      = get_available_cash(pnl)
     equity    = get_total_equity(pnl)
@@ -205,6 +206,8 @@ def ask_claude(pnl: dict, market_data: dict) -> dict:
 
     user_msg = f"""
 Current time (UTC): {datetime.now(timezone.utc).isoformat()}
+
+{premarket_brief}
 
 === PORTFOLIO ===
 Available Cash: ${cash:,.2f}
@@ -291,18 +294,21 @@ def run_cycle():
 
         log.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Market data: {len(market_data)} instruments")
 
-        decisions = ask_claude(pnl, market_data)
+        brief          = build_premarket_brief(etoro_get, instrument_ids)
+        brief_text     = format_brief_for_claude(brief)
+        decisions      = ask_claude(pnl, market_data, brief_text)
         log.info(f"Strategy: {decisions.get('strategy')} | Risk: {decisions.get('risk_level')}")
         log.info(f"Rationale: {decisions.get('rationale')}")
 
         results = execute_actions(decisions, pnl, equity, instrument_ids)
 
         cycle_log = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "equity":    equity,
-            "cash":      cash,
-            "decisions": decisions,
-            "results":   results,
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
+            "equity":          equity,
+            "cash":            cash,
+            "premarket_brief": brief.get("news_sentiment", {}),
+            "decisions":       decisions,
+            "results":         results,
         }
         with open("cycle_log.jsonl", "a") as f:
             f.write(json.dumps(cycle_log) + "\n")
