@@ -456,12 +456,12 @@
   <!-- KPI Row -->
   <div class="kpi-row">
     <div class="kpi" style="--accent: var(--green)">
-      <div class="kpi-label">Virtual Equity</div>
+      <div class="kpi-label">Total Equity</div>
       <div class="kpi-value" id="kpiEquity">—</div>
-      <div class="kpi-sub" id="kpiEquitySub">Virtual trading balance</div>
+      <div class="kpi-sub" id="kpiEquitySub">Live account balance</div>
     </div>
     <div class="kpi" style="--accent: var(--blue)">
-      <div class="kpi-label">Virtual Cash</div>
+      <div class="kpi-label">Available Cash</div>
       <div class="kpi-value" id="kpiCash">—</div>
       <div class="kpi-sub" id="kpiCashSub">—</div>
     </div>
@@ -625,7 +625,7 @@ async function loadPortfolio() {
     const cash   = parseFloat(d.cash || 0);
     document.getElementById('kpiEquity').textContent = '$' + equity.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
     document.getElementById('kpiCash').textContent   = '$' + cash.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-    document.getElementById('kpiCashSub').textContent  = `${(cash/equity*100).toFixed(1)}% buffer (virtual)`;
+    document.getElementById('kpiCashSub').textContent  = `${(cash/equity*100).toFixed(1)}% cash buffer`;
     document.getElementById('kpiPositions').textContent = d.positionCount ?? '0';
     document.getElementById('kpiPosSub').textContent    = `of ${d.positions?.length ?? 0} total`;
     renderPositions(d.positions || []);
