@@ -74,26 +74,32 @@ def get_instrument_id(ticker: str) -> Optional[int]:
     if ticker in _instrument_cache:
         return _instrument_cache[ticker]
     try:
+        # fields param is required — request only what we need
         data = etoro_get("/market-data/search", params={
             "searchText": ticker,
-            "pageSize": 20
+            "pageSize": 20,
+            "fields": "instrumentId,internalSymbolFull,internalInstrumentDisplayName,internalAssetClassName,isDelisted,isActiveInPlatform"
         })
         items = data.get("items", [])
-        # Match only stock/ETF assets with exact symbol — skip forex, crypto etc
+        log.info(f"Search for {ticker} returned {len(items)} items")
+        # Match stocks/ETFs with exact symbol
         for item in items:
             iid = item.get("instrumentId", -1)
             if iid <= 0:
+                continue
+            if item.get("isDelisted") or not item.get("isActiveInPlatform", True):
                 continue
             asset_class = item.get("internalAssetClassName", "").lower()
             if asset_class not in ("stocks", "etf"):
                 continue
             sym = item.get("internalSymbolFull", "").upper()
-            name = item.get("internalInstrumentDisplayName", "").upper()
-            if sym == ticker.upper() or name == ticker.upper():
+            disp = item.get("internalInstrumentDisplayName", "").upper()
+            log.info(f"  candidate: {sym} / {disp} (ID={iid}, class={asset_class})")
+            if sym == ticker.upper() or disp == ticker.upper():
                 _instrument_cache[ticker] = iid
-                log.info(f"Resolved {ticker} -> instrument ID {iid} ({asset_class})")
+                log.info(f"Resolved {ticker} -> instrument ID {iid}")
                 return iid
-        log.warning(f"No stock match found for {ticker}")
+        log.warning(f"No stock match for {ticker} in {len(items)} results")
     except Exception as e:
         log.warning(f"Could not resolve {ticker}: {e}")
     return None
