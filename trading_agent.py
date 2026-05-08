@@ -142,15 +142,16 @@ def get_total_equity(pnl: dict) -> float:
 def get_latest_candle(instrument_id: int) -> dict:
     """
     Fetch the most recent candle for an instrument.
-    Uses the correct eToro candle endpoint.
+    Response structure: { candles: [ { instrumentId, candles: [ {open,high,low,close,...} ] } ] }
     """
     try:
-        path = f"/market-data/instruments/{instrument_id}/history/candles/desc/OneMinute/2"
+        path = f"/market-data/instruments/{instrument_id}/history/candles/desc/OneDay/2"
         data = etoro_get(path)
-        # Response: { candles: [ { open, high, low, close, volume, fromDate } ] }
-        candles = data.get("candles", [])
-        if candles:
-            return candles[0]
+        outer = data.get("candles", [])
+        if outer:
+            inner = outer[0].get("candles", [])
+            if inner:
+                return inner[0]  # Most recent candle
     except Exception as e:
         log.warning(f"Candle fetch failed for {instrument_id}: {e}")
     return {}
