@@ -139,32 +139,47 @@ def get_total_equity(pnl: dict) -> float:
 
 # ── Market data ───────────────────────────────────────────────────────────────
 
+def get_latest_candle(instrument_id: int) -> dict:
+    """
+    Fetch the most recent candle for an instrument.
+    Uses the correct eToro candle endpoint.
+    """
+    try:
+        path = f"/market-data/instruments/{instrument_id}/history/candles/desc/OneMinute/2"
+        data = etoro_get(path)
+        # Response: { candles: [ { open, high, low, close, volume, fromDate } ] }
+        candles = data.get("candles", [])
+        if candles:
+            return candles[0]
+    except Exception as e:
+        log.warning(f"Candle fetch failed for {instrument_id}: {e}")
+    return {}
+
+
 def get_market_data(instrument_ids: dict[str, int]) -> dict:
     """
-    Fetch live rates for all instruments in one batch call.
-    Endpoint: GET /market-data/instruments/rates?instrumentIds=1,2,3
+    Fetch latest price for each instrument via candle history.
+    Falls back to closing price history if candles unavailable.
     """
     if not instrument_ids:
         return {}
-    try:
-        ids_str = ",".join(str(v) for v in instrument_ids.values())
-        data = etoro_get("/market-data/instruments/rates", params={"instrumentIds": ids_str})
-        rates_by_id = {r["instrumentID"]: r for r in data.get("rates", [])}
 
-        snapshot = {}
-        for ticker, iid in instrument_ids.items():
-            rate = rates_by_id.get(iid)
-            if rate:
-                snapshot[ticker] = {
-                    "bid":           rate.get("bid"),
-                    "ask":           rate.get("ask"),
-                    "lastExecution": rate.get("lastExecution"),
-                    "date":          rate.get("date"),
-                }
-        return snapshot
-    except Exception as e:
-        log.warning(f"Market data fetch failed: {e}")
-        return {}
+    snapshot = {}
+    for ticker, iid in instrument_ids.items():
+        candle = get_latest_candle(iid)
+        if candle:
+            snapshot[ticker] = {
+                "lastPrice": candle.get("close"),
+                "open":      candle.get("open"),
+                "high":      candle.get("high"),
+                "low":       candle.get("low"),
+                "volume":    candle.get("volume"),
+                "date":      candle.get("fromDate"),
+            }
+            log.info(f"  {ticker}: ${candle.get('close')}")
+
+    log.info(f"Market data: {len(snapshot)}/{len(instrument_ids)} instruments returned data")
+    return snapshot
 
 # ── Trade execution ───────────────────────────────────────────────────────────
 
@@ -182,7 +197,7 @@ def close_position(position_id: int) -> dict:
 SYSTEM_PROMPT = """You are an expert AI portfolio manager running inside an eToro Agent Portfolio.
 Your goal is to dynamically manage a stock portfolio based on current market conditions.
 
-You will receive the current portfolio state and live market bid/ask prices.
+You will receive the current portfolio state and recent OHLCV candle data.
 
 Your response MUST be valid JSON:
 {
@@ -199,7 +214,7 @@ Rules:
 - Never allocate more than 10% of equity to a single stock
 - Always keep at least 15% in cash
 - Only trade tickers in the provided market data
-- If bid/ask data is present, markets are open - you CAN trade
+- If lastPrice data is present for stocks, markets are open and you CAN trade
 - If no action warranted, return empty actions array
 """
 
@@ -221,7 +236,7 @@ Cash Buffer:    {(cash/equity*100 if equity else 0):.1f}%
 Open Positions: {len(positions)}
 {json.dumps(positions, indent=2)}
 
-=== LIVE MARKET DATA (bid/ask prices) ===
+=== LIVE MARKET DATA (recent candles) ===
 {json.dumps(market_data, indent=2)}
 
 {"NOTE: Market data is available - markets are open for trading." if market_data else "NOTE: No market data returned - markets may be closed."}
