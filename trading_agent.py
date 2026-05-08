@@ -187,11 +187,11 @@ def get_market_data(instrument_ids: dict[str, int]) -> dict:
 def open_position(instrument_id: int, amount_usd: float, is_buy: bool = True) -> dict:
     body = {"InstrumentId": instrument_id, "Amount": round(amount_usd, 2), "Leverage": 1, "IsBuy": is_buy}
     log.info(f"{'BUY' if is_buy else 'SELL'} ${amount_usd:.2f} instrument {instrument_id}")
-    return etoro_post("/trading/execution/real/market-open-orders/by-amount", body)
+    return etoro_post("/trading/execution/market-open-orders/by-amount", body)
 
 def close_position(position_id: int) -> dict:
     log.info(f"CLOSE position {position_id}")
-    return etoro_post(f"/trading/execution/real/market-close-orders/positions/{position_id}", {})
+    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", {})
 
 # ── AI decision engine ────────────────────────────────────────────────────────
 
