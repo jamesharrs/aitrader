@@ -30,19 +30,19 @@ MAX_POSITION_PCT  = 0.10
 MIN_TRADE_AMOUNT  = 50
 RUN_INTERVAL_SECS = 3600
 
-# Top 10 US stocks + their known eToro instrument IDs
-# IDs sourced from eToro's instrument search API
+# Top 10 US stocks with verified eToro instrument IDs
+# Sourced from eToro's static instruments metadata API
 WATCHLIST = {
     "AAPL":  1001,
-    "MSFT":  1002,
-    "GOOGL": 1003,
-    "AMZN":  1004,
-    "NVDA":  1005,
-    "TSLA":  1006,
-    "META":  1007,
-    "JPM":   1008,
-    "V":     1009,
-    "UNH":   1010,
+    "META":  1003,
+    "MSFT":  1004,
+    "AMZN":  1005,
+    "JPM":   1023,
+    "UNH":   1032,
+    "V":     1046,
+    "TSLA":  1111,
+    "NVDA":  1137,
+    "GOOGL": 6434,
 }
 
 # ── eToro API helpers ─────────────────────────────────────────────────────────
@@ -105,13 +105,8 @@ def get_instrument_id(ticker: str) -> Optional[int]:
     return None
 
 def resolve_watchlist_ids() -> dict[str, int]:
-    """Resolve all watchlist tickers to instrument IDs."""
-    resolved = {}
-    for ticker in WATCHLIST:
-        iid = get_instrument_id(ticker)
-        if iid:
-            resolved[ticker] = iid
-    return resolved
+    """Return verified instrument IDs for all watchlist tickers."""
+    return dict(WATCHLIST)  # IDs are hardcoded and verified from eToro metadata API
 
 # ── Portfolio helpers ─────────────────────────────────────────────────────────
 
