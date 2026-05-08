@@ -76,28 +76,24 @@ def get_instrument_id(ticker: str) -> Optional[int]:
     try:
         data = etoro_get("/market-data/search", params={
             "searchText": ticker,
-            "pageSize": 10
+            "pageSize": 20
         })
         items = data.get("items", [])
-        # Find exact symbol match — skip placeholder IDs (-100000)
+        # Match only stock/ETF assets with exact symbol — skip forex, crypto etc
         for item in items:
             iid = item.get("instrumentId", -1)
             if iid <= 0:
                 continue
-            sym = item.get("symbol", "").upper()
-            full = item.get("internalSymbolFull", "").upper()
-            name = item.get("displayname", "").upper()
-            if ticker.upper() in (sym, full, name):
+            asset_class = item.get("internalAssetClassName", "").lower()
+            if asset_class not in ("stocks", "etf"):
+                continue
+            sym = item.get("internalSymbolFull", "").upper()
+            name = item.get("internalInstrumentDisplayName", "").upper()
+            if sym == ticker.upper() or name == ticker.upper():
                 _instrument_cache[ticker] = iid
-                log.info(f"Resolved {ticker} → instrument ID {iid}")
+                log.info(f"Resolved {ticker} -> instrument ID {iid} ({asset_class})")
                 return iid
-        # Fallback: first valid ID
-        for item in items:
-            iid = item.get("instrumentId", -1)
-            if iid > 0:
-                _instrument_cache[ticker] = iid
-                log.info(f"Resolved {ticker} → instrument ID {iid} (first valid result)")
-                return iid
+        log.warning(f"No stock match found for {ticker}")
     except Exception as e:
         log.warning(f"Could not resolve {ticker}: {e}")
     return None
