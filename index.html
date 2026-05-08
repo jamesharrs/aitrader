@@ -448,7 +448,7 @@
     <div class="config-icon">⚙️</div>
     <div class="config-text">Enter your API server URL to connect the dashboard to your running agent.</div>
     <div class="config-inputs">
-      <input class="config-input" id="apiUrlInput" placeholder="http://localhost:8000" value="http://localhost:8000">
+      <input class="config-input" id="apiUrlInput" placeholder="http://localhost:8000" value="https://aitrader-production-e307.up.railway.app">
       <button class="btn btn-green" onclick="connect()">Connect</button>
     </div>
   </div>
@@ -565,7 +565,9 @@
 </div><!-- /everything -->
 
 <script>
-let API_URL = window.location.origin;
+let API_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'https://aitrader-production-e307.up.railway.app'
+  : window.location.origin;
 let refreshTimer = null;
 
 // ── Clock ─────────────────────────────────────────────────────────────────
