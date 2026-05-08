@@ -153,6 +153,37 @@ def manual_trade(req: ManualTradeRequest):
     raise HTTPException(400, f"Unknown action: {req.action}")
 
 
+@app.get("/debug/market")
+def debug_market():
+    """Test instrument resolution and market data - diagnose market hours issues."""
+    from trading_agent import resolve_watchlist_ids, get_market_data, etoro_get
+    results = {}
+    try:
+        raw = etoro_get("/market-data/search", params={
+            "searchText": "AAPL",
+            "fields": "instrumentId,symbol,internalSymbolFull,displayname",
+            "pageSize": 5
+        })
+        results["search_raw"] = raw
+    except Exception as e:
+        results["search_error"] = str(e)
+    try:
+        ids = resolve_watchlist_ids()
+        results["instrument_ids"] = ids
+    except Exception as e:
+        results["ids_error"] = str(e)
+    try:
+        ids = resolve_watchlist_ids()
+        if ids:
+            md = get_market_data(ids)
+            results["market_data"] = md
+        else:
+            results["market_data"] = "no IDs resolved"
+    except Exception as e:
+        results["market_data_error"] = str(e)
+    return results
+
+
 # ── Background tasks ─────────────────────────────────────────────────────────
 
 def _run_agent_loop():
