@@ -170,7 +170,7 @@ def get_market_data(instrument_ids: dict[str, int]) -> dict:
         candle = get_latest_candle(iid)
         if candle:
             snapshot[ticker] = {
-                "lastPrice": candle.get("close"),
+                "lastPrice": candle.get("close"),   # "close" from candle response
                 "open":      candle.get("open"),
                 "high":      candle.get("high"),
                 "low":       candle.get("low"),
@@ -327,6 +327,7 @@ def run_cycle():
             "timestamp":       datetime.now(timezone.utc).isoformat(),
             "equity":          equity,
             "cash":            cash,
+            "market_data":     market_data,
             "premarket_brief": brief.get("news_sentiment", {}),
             "decisions":       decisions,
             "results":         results,
