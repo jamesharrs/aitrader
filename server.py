@@ -152,31 +152,44 @@ def manual_trade(req: ManualTradeRequest):
 @app.get("/debug/market")
 def debug_market():
     """Diagnose instrument resolution and market data."""
-    from trading_agent import resolve_watchlist_ids, get_market_data, etoro_get
-    results = {}
+    from trading_agent import resolve_watchlist_ids, get_market_data, etoro_get, is_market_hours
+    from datetime import datetime, timezone
+    results = {
+        "utc_time":     datetime.now(timezone.utc).isoformat(),
+        "market_hours": is_market_hours(),
+    }
+
+    # Test raw rates endpoint with known IDs
     try:
-        raw = etoro_get("/market-data/search", params={
-            "searchText": "AAPL",
-            "fields": "instrumentId,symbol,internalSymbolFull,displayname",
-            "pageSize": 5
-        })
-        results["search_raw"] = raw
+        ids_str = "1001,1003,1004,1005,1023,1032,1046,1111,1137,6434"
+        raw_rates = etoro_get("/market-data/instruments/rates", params={"instrumentIds": ids_str})
+        results["rates_raw"] = raw_rates
     except Exception as e:
-        results["search_error"] = str(e)
+        results["rates_error"] = str(e)
+
+    # Test alternate rates endpoint format
+    try:
+        raw_rates2 = etoro_get("/market-data/instruments/1001/rates")
+        results["single_rate_raw"] = raw_rates2
+    except Exception as e:
+        results["single_rate_error"] = str(e)
+
+    # Resolved IDs
     try:
         ids = resolve_watchlist_ids()
         results["instrument_ids"] = ids
     except Exception as e:
         results["ids_error"] = str(e)
+
+    # Full market data via our function
     try:
         ids = resolve_watchlist_ids()
-        if ids:
-            md = get_market_data(ids)
-            results["market_data"] = md
-        else:
-            results["market_data"] = "no IDs resolved"
+        md = get_market_data(ids)
+        results["market_data"] = md
+        results["market_data_count"] = len(md)
     except Exception as e:
         results["market_data_error"] = str(e)
+
     return results
 
 
