@@ -21,17 +21,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── State ────────────────────────────────────────────────────────────────────
+# ── State ─────────────────────────────────────────────────────────────────────
 agent_state = {
     "running":      False,
     "last_cycle":   None,
     "cycle_count":  0,
     "status":       "idle",
 }
-_cycle_thread: Optional[threading.Thread] = None
 
-
-# ── Models ───────────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
 class ManualTradeRequest(BaseModel):
     ticker: str
     action: str
@@ -41,26 +39,20 @@ class ManualTradeRequest(BaseModel):
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
-    """Serve the trading dashboard."""
     html_path = os.path.join(os.path.dirname(__file__), "index.html")
     try:
         with open(html_path) as f:
             content = f.read()
-        # Auto-set API URL to same origin so no manual connect needed
         content = content.replace(
-            'value="http://localhost:8000"',
-            'value=""'
-        ).replace(
             "API_URL = 'http://localhost:8000'",
             "API_URL = window.location.origin"
         )
         return HTMLResponse(content=content)
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Dashboard not found</h1><p>index.html missing.</p>", status_code=404)
+        return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
-
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
@@ -68,10 +60,7 @@ def health():
 
 @app.get("/agent/status")
 def agent_status():
-    return {
-        **agent_state,
-        "uptime": "available" if agent_state["running"] else "stopped",
-    }
+    return {**agent_state, "uptime": "available" if agent_state["running"] else "stopped"}
 
 
 @app.post("/agent/start")
@@ -88,7 +77,7 @@ def start_agent(background_tasks: BackgroundTasks):
 def stop_agent():
     agent_state["running"] = False
     agent_state["status"]  = "idle"
-    return {"message": "Agent stopping after current cycle"}
+    return {"message": "Agent stopping"}
 
 
 @app.post("/agent/run-now")
@@ -103,9 +92,13 @@ def portfolio():
         data      = get_portfolio()
         cash      = get_available_cash(data)
         positions = get_open_positions(data)
+        equity    = float(data.get("credit", 0)) + sum(
+            float(p.get("amount", 0)) + float(p.get("profit", 0))
+            for p in data.get("positions", [])
+        )
         return {
             "cash":          cash,
-            "totalEquity":   float(data.get("credit", 0)) + sum(float(p.get("amount", 0)) + float(p.get("profit", 0)) for p in data.get("positions", [])),
+            "totalEquity":   equity,
             "positions":     positions,
             "positionCount": len(positions),
         }
@@ -129,9 +122,7 @@ def get_cycles(limit: int = 20):
 
 @app.post("/trade/manual")
 def manual_trade(req: ManualTradeRequest):
-    from trading_agent import (
-        get_instrument_id, open_position, close_position, get_portfolio, get_open_positions
-    )
+    from trading_agent import get_instrument_id, open_position, close_position
     portfolio = get_portfolio()
     if req.action == "buy":
         if not req.amount_usd:
@@ -141,27 +132,27 @@ def manual_trade(req: ManualTradeRequest):
             raise HTTPException(404, f"Instrument not found: {req.ticker}")
         result = open_position(iid, req.amount_usd)
         return {"message": f"Bought ${req.amount_usd} of {req.ticker}", "result": result}
-
     elif req.action == "close":
         positions = get_open_positions(portfolio)
         pos = next((p for p in positions if req.ticker.upper() in str(p.get("instrumentName","")).upper()), None)
         if not pos:
             raise HTTPException(404, f"No open position for {req.ticker}")
         result = close_position(pos["positionId"])
-        return {"message": f"Closed {req.ticker} position", "result": result}
-
+        return {"message": f"Closed {req.ticker}", "result": result}
     raise HTTPException(400, f"Unknown action: {req.action}")
 
 
+# ── Debug endpoint ────────────────────────────────────────────────────────────
 @app.get("/debug/market")
 def debug_market():
-    """Test instrument resolution and market data - diagnose market hours issues."""
+    """Diagnose instrument resolution and market data."""
     from trading_agent import resolve_watchlist_ids, get_market_data, etoro_get
     results = {}
     try:
         raw = etoro_get("/market-data/search", params={
             "searchText": "AAPL",
-            "pageSize": 10
+            "fields": "instrumentId,symbol,internalSymbolFull,displayname",
+            "pageSize": 5
         })
         results["search_raw"] = raw
     except Exception as e:
@@ -183,8 +174,7 @@ def debug_market():
     return results
 
 
-# ── Background tasks ─────────────────────────────────────────────────────────
-
+# ── Background tasks ──────────────────────────────────────────────────────────
 def _run_agent_loop():
     from trading_agent import RUN_INTERVAL_SECS
     while agent_state["running"]:
