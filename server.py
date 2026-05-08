@@ -60,7 +60,13 @@ def health():
 
 @app.get("/agent/status")
 def agent_status():
-    return {**agent_state, "uptime": "available" if agent_state["running"] else "stopped"}
+    from trading_agent import is_market_hours
+    return {
+        **agent_state,
+        "uptime":       "available" if agent_state["running"] else "stopped",
+        "market_open":  is_market_hours(),
+        "cycle_interval": "15 min" if is_market_hours() else "60 min",
+    }
 
 
 @app.post("/agent/start")

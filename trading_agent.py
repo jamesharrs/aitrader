@@ -26,9 +26,12 @@ ETORO_API_KEY   = os.environ["ETORO_API_KEY"]
 ETORO_USER_KEY  = os.environ["ETORO_USER_KEY"]
 ANTHROPIC_KEY   = os.environ["ANTHROPIC_API_KEY"]
 
-MAX_POSITION_PCT  = 0.10
-MIN_TRADE_AMOUNT  = 50
-RUN_INTERVAL_SECS = 3600
+MAX_POSITION_PCT       = 0.10
+MIN_TRADE_AMOUNT       = 50
+RUN_INTERVAL_MARKET    = 900    # 15 min during market hours
+RUN_INTERVAL_OFFHOURS  = 3600   # 60 min outside market hours
+PRICE_MOVE_THRESHOLD   = 0.02   # 2% move triggers immediate cycle
+RUN_INTERVAL_SECS      = 3600   # legacy fallback
 
 # Top 10 US stocks with verified eToro instrument IDs
 # Sourced from eToro's static instruments metadata API
@@ -322,12 +325,68 @@ def run_cycle():
         log.error(f"Cycle failed: {e}", exc_info=True)
         return {"error": str(e)}
 
+def is_market_hours() -> bool:
+    """Returns True if NYSE is currently open (Mon-Fri 14:30-21:00 UTC)."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    market_open  = now.replace(hour=14, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=21, minute=0,  second=0, microsecond=0)
+    return market_open <= now <= market_close
+
+
+def check_price_alerts(market_data: dict, last_prices: dict) -> list[str]:
+    """Detect any stock that has moved >2% since last cycle."""
+    alerts = []
+    for ticker, data in market_data.items():
+        current = data.get("lastExecution") or data.get("ask")
+        if not current or ticker not in last_prices:
+            continue
+        prev = last_prices[ticker]
+        move = abs((current - prev) / prev)
+        if move >= PRICE_MOVE_THRESHOLD:
+            direction = "▲" if current > prev else "▼"
+            alerts.append(f"{ticker} {direction}{move*100:.1f}%")
+    return alerts
+
+
 def main():
     log.info("eToro AI Trading Agent starting...")
+    last_prices: dict[str, float] = {}
+
     while True:
-        run_cycle()
-        log.info(f"Sleeping {RUN_INTERVAL_SECS}s...")
-        time.sleep(RUN_INTERVAL_SECS)
+        result     = run_cycle()
+        in_market  = is_market_hours()
+        interval   = RUN_INTERVAL_MARKET if in_market else RUN_INTERVAL_OFFHOURS
+
+        # Update last known prices for alert tracking
+        market_data = result.get("market_data", {}) if isinstance(result, dict) else {}
+        for ticker, data in market_data.items():
+            price = data.get("lastExecution") or data.get("ask")
+            if price:
+                last_prices[ticker] = price
+
+        log.info(f"{'[MARKET OPEN]' if in_market else '[AFTER HOURS]'} "
+                 f"Next cycle in {interval//60} min...")
+
+        # Sleep in 60s increments so we can react to price alerts
+        slept = 0
+        while slept < interval:
+            time.sleep(60)
+            slept += 60
+
+            # During market hours, check for big price moves every minute
+            if in_market and last_prices:
+                try:
+                    ids  = resolve_watchlist_ids()
+                    md   = get_market_data(ids)
+                    alerts = check_price_alerts(md, last_prices)
+                    if alerts:
+                        log.info(f"Price alert triggered: {', '.join(alerts)} — running early cycle")
+                        break
+                except Exception:
+                    pass  # Don't crash the sleep loop on transient errors
+
 
 if __name__ == "__main__":
     main()
