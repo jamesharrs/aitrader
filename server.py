@@ -94,13 +94,38 @@ def run_now(background_tasks: BackgroundTasks):
 
 @app.get("/portfolio")
 def portfolio():
+    # Reverse map: instrumentID → ticker
+    ID_TO_TICKER = {
+        1001: 'AAPL', 1003: 'META', 1004: 'MSFT', 1005: 'AMZN',
+        1023: 'JPM',  1032: 'UNH',  1046: 'V',    1111: 'TSLA',
+        1137: 'NVDA', 6434: 'GOOGL'
+    }
     try:
         data      = get_portfolio()
         cash      = get_available_cash(data)
-        positions = get_open_positions(data)
-        equity    = float(data.get("credit", 0)) + sum(
-            float(p.get("amount", 0)) + float(p.get("profit", 0))
-            for p in data.get("positions", [])
+        raw_pos   = get_open_positions(data)
+
+        # Normalise positions to what the dashboard expects
+        positions = []
+        for p in raw_pos:
+            iid     = p.get("instrumentID") or p.get("instrumentId")
+            ticker  = ID_TO_TICKER.get(iid, f"ID:{iid}")
+            pl      = p.get("unrealizedPnL", {}).get("pnL", 0)
+            invested = float(p.get("amount", 0))
+            positions.append({
+                "positionId":     p.get("positionID"),
+                "instrumentName": ticker,
+                "instrumentId":   iid,
+                "invested":       invested,
+                "profit":         pl,
+                "units":          p.get("units", 0),
+                "openRate":       p.get("openRate"),
+                "isBuy":          p.get("isBuy"),
+            })
+
+        equity = float(data.get("credit", 0)) + sum(
+            float(p.get("amount", 0)) + float(p.get("unrealizedPnL", {}).get("pnL", 0))
+            for p in raw_pos
         )
         return {
             "cash":          cash,
