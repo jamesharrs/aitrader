@@ -167,12 +167,12 @@ def debug_market():
     except Exception as e:
         results["rates_error"] = str(e)
 
-    # Test alternate rates endpoint format
+    # Test candle endpoint with daily interval (works outside hours)
     try:
-        raw_rates2 = etoro_get("/market-data/instruments/1001/rates")
-        results["single_rate_raw"] = raw_rates2
+        daily = etoro_get("/market-data/instruments/1001/history/candles/desc/OneDay/2")
+        results["aapl_daily_candles"] = daily
     except Exception as e:
-        results["single_rate_error"] = str(e)
+        results["aapl_daily_error"] = str(e)
 
     # Resolved IDs
     try:
