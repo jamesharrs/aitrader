@@ -161,8 +161,7 @@ def debug_market():
     try:
         raw = etoro_get("/market-data/search", params={
             "searchText": "AAPL",
-            "fields": "instrumentId,symbol,internalSymbolFull,displayname",
-            "pageSize": 5
+            "pageSize": 10
         })
         results["search_raw"] = raw
     except Exception as e:

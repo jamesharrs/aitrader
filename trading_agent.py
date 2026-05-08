@@ -76,23 +76,28 @@ def get_instrument_id(ticker: str) -> Optional[int]:
     try:
         data = etoro_get("/market-data/search", params={
             "searchText": ticker,
-            "fields": "instrumentId,symbol,internalSymbolFull,displayname",
-            "pageSize": 5
+            "pageSize": 10
         })
         items = data.get("items", [])
-        # Find exact symbol match
+        # Find exact symbol match — skip placeholder IDs (-100000)
         for item in items:
-            if item.get("symbol", "").upper() == ticker.upper() or item.get("internalSymbolFull", "").upper() == ticker.upper():
-                iid = item["instrumentId"]
+            iid = item.get("instrumentId", -1)
+            if iid <= 0:
+                continue
+            sym = item.get("symbol", "").upper()
+            full = item.get("internalSymbolFull", "").upper()
+            name = item.get("displayname", "").upper()
+            if ticker.upper() in (sym, full, name):
                 _instrument_cache[ticker] = iid
                 log.info(f"Resolved {ticker} → instrument ID {iid}")
                 return iid
-        # Fallback to first result
-        if items:
-            iid = items[0]["instrumentId"]
-            _instrument_cache[ticker] = iid
-            log.info(f"Resolved {ticker} → instrument ID {iid} (first result)")
-            return iid
+        # Fallback: first valid ID
+        for item in items:
+            iid = item.get("instrumentId", -1)
+            if iid > 0:
+                _instrument_cache[ticker] = iid
+                log.info(f"Resolved {ticker} → instrument ID {iid} (first valid result)")
+                return iid
     except Exception as e:
         log.warning(f"Could not resolve {ticker}: {e}")
     return None
