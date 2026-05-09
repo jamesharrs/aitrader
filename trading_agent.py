@@ -31,6 +31,9 @@ MIN_TRADE_AMOUNT       = 50
 RUN_INTERVAL_MARKET    = 900    # 15 min during market hours
 RUN_INTERVAL_OFFHOURS  = 3600   # 60 min outside market hours
 PRICE_MOVE_THRESHOLD   = 0.02   # 2% move triggers immediate cycle
+
+# Pre-market brief cache — only refresh once per trading day
+_brief_cache = {"date": None, "brief": {}}
 RUN_INTERVAL_SECS      = 3600   # legacy fallback
 
 # Top 10 US stocks with verified eToro instrument IDs
@@ -245,7 +248,7 @@ Open Positions: {len(positions)}
 Return ONLY valid JSON.
 """
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=1500,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}]
@@ -320,9 +323,19 @@ def run_cycle():
 
         log.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Market data: {len(market_data)} instruments")
 
-        brief          = build_premarket_brief(etoro_get, instrument_ids)
-        brief_text     = format_brief_for_claude(brief)
-        decisions      = ask_claude(pnl, market_data, brief_text)
+        # Refresh pre-market brief once per trading day (saves ~90% of token costs)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _brief_cache["date"] != today:
+            log.info("Refreshing pre-market brief (daily)...")
+            brief = build_premarket_brief(etoro_get, instrument_ids)
+            _brief_cache["date"]  = today
+            _brief_cache["brief"] = brief
+        else:
+            log.info("Using cached pre-market brief (no token cost)")
+            brief = _brief_cache["brief"]
+
+        brief_text = format_brief_for_claude(brief)
+        decisions  = ask_claude(pnl, market_data, brief_text)
         log.info(f"Strategy: {decisions.get('strategy')} | Risk: {decisions.get('risk_level')}")
         log.info(f"Rationale: {decisions.get('rationale')}")
 
