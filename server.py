@@ -151,6 +151,19 @@ def get_cycles(limit: int = 20):
         return {"cycles": [], "total": 0}
 
 
+
+@app.get("/debug/close/{position_id}")
+def debug_close(position_id: int):
+    """Test close endpoint and return full error detail from eToro."""
+    import requests as req
+    from trading_agent import _headers, ETORO_BASE
+    url = f"{ETORO_BASE}/trading/execution/market-close-orders/positions/{position_id}"
+    try:
+        r = req.post(url, headers=_headers(), json={"UnitsToDeduct": None}, timeout=15)
+        return {"status": r.status_code, "body": r.json()}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/trade/close/{position_id}")
 def close_by_id(position_id: int):
     """Close a specific position by its positionId directly."""
