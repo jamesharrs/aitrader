@@ -194,7 +194,7 @@ def open_position(instrument_id: int, amount_usd: float, is_buy: bool = True) ->
 
 def close_position(position_id: int) -> dict:
     log.info(f"CLOSE position {position_id}")
-    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", {})
+    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", {"UnitsToDeduct": None})
 
 # ── AI decision engine ────────────────────────────────────────────────────────
 
