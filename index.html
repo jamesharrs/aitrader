@@ -734,12 +734,9 @@ async function agentAction(action) {
 }
 
 async function closePosition(posId, name) {
-  if (!confirm(`Close ${name} position?`)) return;
+  if (!confirm(`Close ${name} position ${posId}?`)) return;
   try {
-    await api(`/trade/manual`, {
-      method: 'POST',
-      body: JSON.stringify({ ticker: name, action: 'close' })
-    });
+    await api(`/trade/close/${posId}`, { method: 'POST', body: '{}'});
     setTimeout(loadPortfolio, 800);
   } catch(e) { alert('Failed to close: ' + e.message); }
 }
