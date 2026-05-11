@@ -153,23 +153,35 @@ def get_cycles(limit: int = 20):
 
 @app.post("/trade/manual")
 def manual_trade(req: ManualTradeRequest):
-    from trading_agent import get_instrument_id, open_position, close_position
-    portfolio = get_portfolio()
+    from trading_agent import get_instrument_id, open_position, close_position, WATCHLIST
+    ID_TO_TICKER = {v: k for k, v in WATCHLIST.items()}
+    TICKER_TO_ID = WATCHLIST
+
     if req.action == "buy":
         if not req.amount_usd:
             raise HTTPException(400, "amount_usd required for buy")
-        iid = get_instrument_id(req.ticker)
+        iid = TICKER_TO_ID.get(req.ticker.upper()) or get_instrument_id(req.ticker)
         if not iid:
             raise HTTPException(404, f"Instrument not found: {req.ticker}")
         result = open_position(iid, req.amount_usd)
         return {"message": f"Bought ${req.amount_usd} of {req.ticker}", "result": result}
+
     elif req.action == "close":
-        positions = get_open_positions(portfolio)
-        pos = next((p for p in positions if req.ticker.upper() in str(p.get("instrumentName","")).upper()), None)
+        # Use normalised portfolio so ticker names are resolved
+        data = get_portfolio()
+        raw_positions = get_open_positions(data)
+        # Find position by instrumentID matching ticker
+        target_id = TICKER_TO_ID.get(req.ticker.upper())
+        pos = next((
+            p for p in raw_positions
+            if (p.get("instrumentID") or p.get("instrumentId")) == target_id
+        ), None)
         if not pos:
             raise HTTPException(404, f"No open position for {req.ticker}")
-        result = close_position(pos["positionId"])
-        return {"message": f"Closed {req.ticker}", "result": result}
+        position_id = pos.get("positionID") or pos.get("positionId")
+        result = close_position(position_id)
+        return {"message": f"Closed {req.ticker} position {position_id}", "result": result}
+
     raise HTTPException(400, f"Unknown action: {req.action}")
 
 

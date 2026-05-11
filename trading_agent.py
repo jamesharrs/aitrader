@@ -264,11 +264,7 @@ Return ONLY valid JSON.
 
 def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: dict) -> list[dict]:
     results = []
-    ID_TO_TICKER = {
-        1001: "AAPL", 1003: "META", 1004: "MSFT", 1005: "AMZN",
-        1023: "JPM",  1032: "UNH",  1046: "V",    1111: "TSLA",
-        1137: "NVDA", 6434: "GOOGL"
-    }
+    ID_TO_TICKER = {v: k for k, v in WATCHLIST.items()}
     positions_by_ticker = {
         ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId"), "").upper(): p
         for p in get_open_positions(pnl)
@@ -297,7 +293,7 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
                 if not pos:
                     log.warning(f"Cannot close {ticker}: no open position")
                     continue
-                result = close_position(pos.get("positionID") or pos.get("positionId"))
+                pid = pos.get("positionID") or pos.get("positionId"); result = close_position(pid)
                 results.append({"action": "close", "ticker": ticker, "result": result})
 
         except requests.HTTPError as e:
