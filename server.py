@@ -157,9 +157,16 @@ def debug_close(position_id: int):
     """Test close endpoint and return full error detail from eToro."""
     import requests as req
     from trading_agent import _headers, ETORO_BASE
+    # Get instrument ID for this position from portfolio
+    from trading_agent import get_portfolio, get_open_positions, WATCHLIST
+    ID_TO_TICKER = {v:k for k,v in WATCHLIST.items()}
+    pnl = get_portfolio()
+    raw = get_open_positions(pnl)
+    pos = next((p for p in raw if (p.get("positionID") or p.get("positionId")) == position_id), None)
+    iid = (pos.get("instrumentID") or pos.get("instrumentId")) if pos else None
     url = f"{ETORO_BASE}/trading/execution/market-close-orders/positions/{position_id}"
     try:
-        r = req.post(url, headers=_headers(), json={"UnitsToDeduct": None}, timeout=15)
+        r = req.post(url, headers=_headers(), json={"InstrumentId": iid, "UnitsToDeduct": None}, timeout=15)
         return {"status": r.status_code, "body": r.json()}
     except Exception as e:
         return {"error": str(e)}
@@ -167,9 +174,13 @@ def debug_close(position_id: int):
 @app.post("/trade/close/{position_id}")
 def close_by_id(position_id: int):
     """Close a specific position by its positionId directly."""
-    from trading_agent import close_position
+    from trading_agent import close_position, get_portfolio, get_open_positions
+    pnl = get_portfolio()
+    raw = get_open_positions(pnl)
+    pos = next((p for p in raw if (p.get("positionID") or p.get("positionId")) == position_id), None)
+    iid = (pos.get("instrumentID") or pos.get("instrumentId")) if pos else None
     try:
-        result = close_position(position_id)
+        result = close_position(position_id, iid)
         return {"message": f"Closed position {position_id}", "result": result}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -200,7 +211,8 @@ def manual_trade(req: ManualTradeRequest):
         if not pos:
             raise HTTPException(404, f"No open position for {target}")
         position_id = pos["positionId"]
-        result = close_position(position_id)
+        iid = pos.get("instrumentId")
+        result = close_position(position_id, iid)
         return {"message": f"Closed {target} position {position_id}", "result": result}
 
     raise HTTPException(400, f"Unknown action: {req.action}")

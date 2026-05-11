@@ -192,9 +192,10 @@ def open_position(instrument_id: int, amount_usd: float, is_buy: bool = True) ->
     log.info(f"{'BUY' if is_buy else 'SELL'} ${amount_usd:.2f} instrument {instrument_id}")
     return etoro_post("/trading/execution/market-open-orders/by-amount", body)
 
-def close_position(position_id: int) -> dict:
-    log.info(f"CLOSE position {position_id}")
-    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", {"UnitsToDeduct": None})
+def close_position(position_id: int, instrument_id: int = None) -> dict:
+    log.info(f"CLOSE position {position_id} instrument {instrument_id}")
+    body = {"InstrumentId": instrument_id, "UnitsToDeduct": None}
+    return etoro_post(f"/trading/execution/market-close-orders/positions/{position_id}", body)
 
 # ── AI decision engine ────────────────────────────────────────────────────────
 
@@ -293,7 +294,9 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
                 if not pos:
                     log.warning(f"Cannot close {ticker}: no open position")
                     continue
-                pid = pos.get("positionID") or pos.get("positionId"); result = close_position(pid)
+                pid = pos.get("positionID") or pos.get("positionId")
+                iid = pos.get("instrumentID") or pos.get("instrumentId") or WATCHLIST.get(ticker)
+                result = close_position(pid, iid)
                 results.append({"action": "close", "ticker": ticker, "result": result})
 
         except requests.HTTPError as e:
