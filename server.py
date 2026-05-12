@@ -127,6 +127,19 @@ def portfolio():
             float(p.get("amount", 0)) + float(p.get("unrealizedPnL", {}).get("pnL", 0))
             for p in raw_pos
         )
+        # Consolidate multiple orders of same ticker into one row (matches eToro UI)
+        from collections import defaultdict
+        consolidated = {}
+        for p in positions:
+            t = p["instrumentName"]
+            if t not in consolidated:
+                consolidated[t] = dict(p)
+            else:
+                consolidated[t]["invested"] += p["invested"]
+                consolidated[t]["profit"]   += p["profit"]
+                consolidated[t]["units"]    += p["units"]
+        positions = list(consolidated.values())
+
         return {
             "cash":          cash,
             "totalEquity":   equity,

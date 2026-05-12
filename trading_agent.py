@@ -33,7 +33,19 @@ RUN_INTERVAL_OFFHOURS  = 3600   # 60 min outside market hours
 PRICE_MOVE_THRESHOLD   = 0.02   # 2% move triggers immediate cycle
 
 # Pre-market brief cache — only refresh once per trading day
-_brief_cache = {"date": None, "brief": {}}
+def _load_brief_cache() -> dict:
+    try:
+        with open("brief_cache.json") as f:
+            return json.load(f)
+    except Exception:
+        return {"date": None, "brief": {}}
+
+def _save_brief_cache(date: str, brief: dict):
+    try:
+        with open("brief_cache.json", "w") as f:
+            json.dump({"date": date, "brief": brief}, f)
+    except Exception as e:
+        log.warning(f"Could not save brief cache: {e}")
 RUN_INTERVAL_SECS      = 3600   # legacy fallback
 
 # Top 10 US stocks with verified eToro instrument IDs
@@ -324,14 +336,14 @@ def run_cycle():
 
         # Refresh pre-market brief once per trading day (saves ~90% of token costs)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if _brief_cache["date"] != today:
+        _cache = _load_brief_cache()
+        if _cache["date"] != today:
             log.info("Refreshing pre-market brief (daily)...")
             brief = build_premarket_brief(etoro_get, instrument_ids)
-            _brief_cache["date"]  = today
-            _brief_cache["brief"] = brief
+            _save_brief_cache(today, brief)
         else:
             log.info("Using cached pre-market brief (no token cost)")
-            brief = _brief_cache["brief"]
+            brief = _cache["brief"]
 
         brief_text = format_brief_for_claude(brief)
         decisions  = ask_claude(pnl, market_data, brief_text)
