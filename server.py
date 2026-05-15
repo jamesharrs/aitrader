@@ -284,35 +284,46 @@ def _run_agent_loop():
         get_market_data, check_price_alerts
     )
     last_prices: dict = {}
+    ALERT_COOLDOWN = 300  # don't check for price alerts in first 5 min after a cycle
 
     while agent_state["running"]:
         _single_cycle()
         if not agent_state["running"]:
             break
 
-        in_market = is_market_hours()
-        interval  = RUN_INTERVAL_MARKET if in_market else RUN_INTERVAL_OFFHOURS
-
-        # Update last known prices
+        # Capture prices right after cycle for alert baseline
         result = agent_state.get("last_cycle") or {}
         for ticker, data in (result.get("market_data") or {}).items():
             price = data.get("lastPrice")
             if price:
                 last_prices[ticker] = price
 
-        # Sleep in 60s chunks, checking for price alerts during market hours
+        # Sleep in 60s chunks; re-evaluate market hours each tick so
+        # the interval shrinks naturally when the market opens mid-sleep
         slept = 0
-        while slept < interval and agent_state["running"]:
+        while agent_state["running"]:
+            in_market = is_market_hours()
+            interval  = RUN_INTERVAL_MARKET if in_market else RUN_INTERVAL_OFFHOURS
+            if slept >= interval:
+                break
+
             time.sleep(60)
             slept += 60
 
-            if in_market and last_prices:
+            # Only check price alerts after cooldown, and only during market hours
+            if in_market and last_prices and slept >= ALERT_COOLDOWN:
                 try:
                     ids    = resolve_watchlist_ids()
                     md     = get_market_data(ids)
                     alerts = check_price_alerts(md, last_prices)
                     if alerts:
-                        break  # Trigger early cycle
+                        log.info(f"Price alert triggered early cycle: {alerts}")
+                        # Update baseline so we don't re-trigger immediately
+                        for ticker, data in md.items():
+                            price = data.get("lastPrice")
+                            if price:
+                                last_prices[ticker] = price
+                        break
                 except Exception:
                     pass
 
