@@ -7,6 +7,7 @@ import json
 import uuid
 import time
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 import requests
@@ -31,6 +32,7 @@ MIN_TRADE_AMOUNT       = 50
 RUN_INTERVAL_MARKET    = 900    # 15 min during market hours
 RUN_INTERVAL_OFFHOURS  = 3600   # 60 min outside market hours
 PRICE_MOVE_THRESHOLD   = 0.02   # 2% move triggers immediate cycle
+BRIEF_REFRESH_THRESHOLD = 0.03  # 3% intraday move triggers mid-session brief refresh
 
 # Pre-market brief cache — only refresh once per trading day
 def _load_brief_cache() -> dict:
@@ -154,45 +156,61 @@ def get_total_equity(pnl: dict) -> float:
 
 # ── Market data ───────────────────────────────────────────────────────────────
 
-def get_latest_candle(instrument_id: int) -> dict:
+def get_candle_history(instrument_id: int, count: int = 6) -> list[dict]:
     """
-    Fetch the most recent candle for an instrument.
-    Response structure: { candles: [ { instrumentId, candles: [ {open,high,low,close,...} ] } ] }
+    Fetch last N daily candles for an instrument (oldest → newest).
+    Response: { candles: [ { instrumentId, candles: [...] } ] }
     """
     try:
-        path = f"/market-data/instruments/{instrument_id}/history/candles/desc/OneDay/2"
+        path = f"/market-data/instruments/{instrument_id}/history/candles/desc/OneDay/{count}"
         data = etoro_get(path)
         outer = data.get("candles", [])
         if outer:
             inner = outer[0].get("candles", [])
-            if inner:
-                return inner[0]  # Most recent candle
+            # API returns desc order; reverse to get oldest → newest
+            return list(reversed(inner))
     except Exception as e:
-        log.warning(f"Candle fetch failed for {instrument_id}: {e}")
-    return {}
+        log.warning(f"Candle history fetch failed for {instrument_id}: {e}")
+    return []
 
 
 def get_market_data(instrument_ids: dict[str, int]) -> dict:
     """
-    Fetch latest price for each instrument via candle history.
-    Falls back to closing price history if candles unavailable.
+    Fetch 5-day rolling price context for each instrument.
+    Returns lastPrice, 5-day close history, simple trend direction, and volume signal.
     """
     if not instrument_ids:
         return {}
 
     snapshot = {}
     for ticker, iid in instrument_ids.items():
-        candle = get_latest_candle(iid)
-        if candle:
+        candles = get_candle_history(iid, count=6)
+        if candles:
+            latest = candles[-1]
+            closes = [c.get("close") for c in candles if c.get("close")]
+
+            # Simple 5-day trend: compare last close to 5-day-ago close
+            pct_change_5d = None
+            if len(closes) >= 2:
+                pct_change_5d = round((closes[-1] - closes[0]) / closes[0] * 100, 2)
+
+            # Volume signal: today vs average of prior days
+            volumes = [c.get("volume", 0) for c in candles]
+            avg_vol = sum(volumes[:-1]) / max(len(volumes) - 1, 1) if len(volumes) > 1 else None
+            vol_ratio = round(volumes[-1] / avg_vol, 2) if avg_vol and avg_vol > 0 else None
+
             snapshot[ticker] = {
-                "lastPrice": candle.get("close"),   # "close" from candle response
-                "open":      candle.get("open"),
-                "high":      candle.get("high"),
-                "low":       candle.get("low"),
-                "volume":    candle.get("volume"),
-                "date":      candle.get("fromDate"),
+                "lastPrice":    latest.get("close"),
+                "open":         latest.get("open"),
+                "high":         latest.get("high"),
+                "low":          latest.get("low"),
+                "volume":       latest.get("volume"),
+                "date":         latest.get("fromDate"),
+                "closes_5d":    closes,          # [oldest … newest] — shows trend
+                "pct_change_5d": pct_change_5d,  # positive = uptrend
+                "volume_ratio": vol_ratio,        # >1.2 = high volume, <0.8 = low volume
             }
-            log.info(f"  {ticker}: ${candle.get('close')}")
+            log.info(f"  {ticker}: ${latest.get('close')} | 5d: {pct_change_5d}% | vol_ratio: {vol_ratio}")
 
     log.info(f"Market data: {len(snapshot)}/{len(instrument_ids)} instruments returned data")
     return snapshot
@@ -212,28 +230,53 @@ def close_position(position_id: int, instrument_id: int = None) -> dict:
 # ── AI decision engine ────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are an expert AI portfolio manager running inside an eToro Agent Portfolio.
-Your goal is to dynamically manage a stock portfolio based on current market conditions.
+Your goal is to dynamically manage a stock portfolio to generate returns above the S&P 500.
 
-You will receive the current portfolio state and recent OHLCV candle data.
+You receive: portfolio state, 5-day rolling OHLCV data per stock, and a pre-market briefing.
 
 Your response MUST be valid JSON:
 {
   "strategy": "momentum|mean_reversion|defensive|hold",
-  "rationale": "Brief explanation",
+  "rationale": "Specific explanation citing price action and market context",
   "actions": [
-    {"action": "buy|close", "ticker": "AAPL", "amount_usd": 500, "reason": "Short reason"}
+    {
+      "action": "buy|close",
+      "ticker": "AAPL",
+      "amount_usd": 500,
+      "confidence": "high|medium|low",
+      "reason": "Specific reason citing data"
+    }
   ],
   "risk_level": "low|medium|high",
-  "next_review": "1h|4h|24h"
+  "next_review": "1h|4h|24h",
+  "hold_cash_reason": "Only populate if actions is empty — specific signal you are waiting for"
 }
 
-Rules:
-- Never allocate more than 10% of equity to a single stock
-- Always keep at least 15% in cash
-- Only trade tickers in the provided market data
-- If lastPrice data is present for stocks, markets are open and you CAN trade
-- If no action warranted, return empty actions array
+Portfolio rules (enforced in code — do not exceed):
+- Max 10% of equity per position
+- Min 15% cash buffer at all times
+- Min trade size $50
+- Only trade tickers present in market data
+
+Decision-making guidance:
+- Use closes_5d to identify trend direction. Rising closes = uptrend, falling = downtrend.
+- Use pct_change_5d: >+3% over 5 days is momentum; <-3% may be mean-reversion opportunity.
+- Use volume_ratio: >1.2 with rising price = confirmed momentum; >1.2 with falling = distribution.
+- momentum strategy: buy stocks with >+2% 5d change AND volume_ratio > 1.0
+- mean_reversion strategy: buy stocks down >3% over 5d with no fundamental deterioration
+- defensive strategy: hold cash or stable names (JPM, UNH, V) when risk_level is high
+- hold strategy: ONLY use when there is genuinely no actionable signal — not as default
+
+IMPORTANT — Opportunity cost of inaction:
+Holding cash is a deliberate choice with an opportunity cost, not a safe default.
+If you return empty actions, you MUST populate hold_cash_reason with a SPECIFIC signal
+you are waiting for (e.g. "waiting for NVDA to confirm breakout above $950 on volume").
+If the portfolio has held >60% cash for multiple consecutive cycles with no action,
+that is a failure mode — find an opportunity or explain precisely what would change.
+
+If market data is present and prices are available, markets are open. You CAN trade.
 """
+
 
 def ask_claude(pnl: dict, market_data: dict, premarket_brief: str = "") -> dict:
     client    = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -241,27 +284,41 @@ def ask_claude(pnl: dict, market_data: dict, premarket_brief: str = "") -> dict:
     equity    = get_total_equity(pnl)
     positions = get_open_positions(pnl)
 
+    # Summarise positions for the prompt — include P&L context
+    pos_summary = []
+    for p in positions:
+        profit = float(p.get("profit", 0))
+        invested = float(p.get("amount", 0))
+        pct = (profit / invested * 100) if invested else 0
+        pos_summary.append({
+            "ticker":   p.get("instrumentName", "?"),
+            "invested": round(invested, 2),
+            "profit":   round(profit, 2),
+            "pct":      round(pct, 2),
+        })
+
     user_msg = f"""
 Current time (UTC): {datetime.now(timezone.utc).isoformat()}
 
 {premarket_brief}
 
-=== PORTFOLIO ===
+=== PORTFOLIO STATE ===
 Available Cash: ${cash:,.2f}
 Total Equity:   ${equity:,.2f}
 Cash Buffer:    {(cash/equity*100 if equity else 0):.1f}%
-Open Positions: {len(positions)}
-{json.dumps(positions, indent=2)}
+Open Positions ({len(positions)}):
+{json.dumps(pos_summary, indent=2)}
 
-=== LIVE MARKET DATA (recent candles) ===
+=== MARKET DATA (5-day rolling context) ===
+Fields: lastPrice, open, high, low, closes_5d (oldest→newest), pct_change_5d (5d%), volume_ratio (vs avg)
 {json.dumps(market_data, indent=2)}
 
-{"NOTE: Market data is available - markets are open for trading." if market_data else "NOTE: No market data returned - markets may be closed."}
+{"NOTE: Market data present — markets are open. You can execute trades now." if market_data else "NOTE: No market data — markets may be closed."}
 
-Return ONLY valid JSON.
+Analyse the trend data carefully before deciding. Return ONLY valid JSON.
 """
     response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-20250514",
         max_tokens=1500,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}]
@@ -290,7 +347,12 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
 
         try:
             if act_type == "buy":
-                safe_amount = min(amount_usd, equity * MAX_POSITION_PCT)
+                # Conviction-based position sizing
+                confidence = action.get("confidence", "medium")
+                size_pct = {"high": 0.08, "medium": 0.05, "low": 0.03}.get(confidence, 0.05)
+                # If amount_usd specified, use it — but cap by conviction ceiling
+                conviction_cap = equity * size_pct
+                safe_amount = min(amount_usd or conviction_cap, equity * MAX_POSITION_PCT, conviction_cap)
                 if safe_amount < MIN_TRADE_AMOUNT:
                     log.info(f"Skipping BUY {ticker}: ${safe_amount:.2f} below minimum")
                     continue
@@ -320,12 +382,65 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
 
     return results
 
+
+# ── Decision accuracy tracker ─────────────────────────────────────────────────
+
+def init_decision_db():
+    """Create SQLite table for tracking decision accuracy."""
+    conn = sqlite3.connect("decisions.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS decisions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT,
+            ticker      TEXT,
+            action      TEXT,
+            confidence  TEXT,
+            price_at_decision REAL,
+            reason      TEXT,
+            strategy    TEXT,
+            next_price  REAL,       -- filled in on following cycle
+            pct_outcome REAL        -- positive = good call
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def record_decisions(decisions: dict, market_data: dict):
+    """Log each trade decision with entry price for future accuracy scoring."""
+    conn = sqlite3.connect("decisions.db")
+    ts = datetime.now(timezone.utc).isoformat()
+    strategy = decisions.get("strategy", "hold")
+    for action in decisions.get("actions", []):
+        ticker = action.get("ticker", "").upper()
+        price = (market_data.get(ticker) or {}).get("lastPrice")
+        conn.execute("""
+            INSERT INTO decisions (timestamp, ticker, action, confidence, price_at_decision, reason, strategy)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (ts, ticker, action.get("action"), action.get("confidence"), price, action.get("reason"), strategy))
+    conn.commit()
+    conn.close()
+
+def update_decision_outcomes(market_data: dict):
+    """Fill in next_price and pct_outcome for decisions that are missing them."""
+    conn = sqlite3.connect("decisions.db")
+    rows = conn.execute(
+        "SELECT id, ticker, price_at_decision FROM decisions WHERE next_price IS NULL AND price_at_decision IS NOT NULL"
+    ).fetchall()
+    for row_id, ticker, entry_price in rows:
+        current = (market_data.get(ticker) or {}).get("lastPrice")
+        if current and entry_price:
+            pct = round((current - entry_price) / entry_price * 100, 2)
+            conn.execute("UPDATE decisions SET next_price=?, pct_outcome=? WHERE id=?", (current, pct, row_id))
+    conn.commit()
+    conn.close()
+
 # ── Run cycle ─────────────────────────────────────────────────────────────────
 
 def run_cycle():
     log.info("=" * 60)
     log.info("Starting trading cycle")
     try:
+        init_decision_db()
         pnl            = get_portfolio()
         equity         = get_total_equity(pnl)
         cash           = get_available_cash(pnl)
@@ -334,13 +449,40 @@ def run_cycle():
 
         log.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Market data: {len(market_data)} instruments")
 
-        # Refresh pre-market brief once per trading day (saves ~90% of token costs)
+        # Update outcomes for any prior decisions now that new prices are in
+        if market_data:
+            update_decision_outcomes(market_data)
+
+        # Daily brief — with mid-session refresh if any stock moved >3% since morning
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         _cache = _load_brief_cache()
-        if _cache["date"] != today:
-            log.info("Refreshing pre-market brief (daily)...")
+
+        needs_refresh = _cache["date"] != today
+        if not needs_refresh and market_data:
+            # Check if any stock has moved significantly since the brief was generated
+            morning_prices = _cache.get("morning_prices", {})
+            for ticker, data in market_data.items():
+                current = data.get("lastPrice") or 0
+                morning = morning_prices.get(ticker) or 0
+                if morning and current and abs((current - morning) / morning) >= BRIEF_REFRESH_THRESHOLD:
+                    log.info(f"Mid-session brief refresh triggered by {ticker} move")
+                    needs_refresh = True
+                    break
+
+        if needs_refresh:
+            log.info("Refreshing pre-market brief...")
             brief = build_premarket_brief(etoro_get, instrument_ids)
+            morning_prices = {t: d.get("lastPrice") for t, d in market_data.items()}
             _save_brief_cache(today, brief)
+            # Store morning prices alongside cache for mid-session drift detection
+            try:
+                with open("brief_cache.json") as f:
+                    cached = json.load(f)
+                cached["morning_prices"] = morning_prices
+                with open("brief_cache.json", "w") as f:
+                    json.dump(cached, f)
+            except Exception:
+                pass
         else:
             log.info("Using cached pre-market brief (no token cost)")
             brief = _cache["brief"]
@@ -349,6 +491,11 @@ def run_cycle():
         decisions  = ask_claude(pnl, market_data, brief_text)
         log.info(f"Strategy: {decisions.get('strategy')} | Risk: {decisions.get('risk_level')}")
         log.info(f"Rationale: {decisions.get('rationale')}")
+        if not decisions.get("actions") and decisions.get("hold_cash_reason"):
+            log.info(f"Hold reason: {decisions.get('hold_cash_reason')}")
+
+        # Record decisions with entry prices for accuracy tracking
+        record_decisions(decisions, market_data)
 
         results = execute_actions(decisions, pnl, equity, instrument_ids)
 
