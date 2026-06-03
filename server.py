@@ -94,54 +94,66 @@ def run_now(background_tasks: BackgroundTasks):
 
 @app.get("/portfolio")
 def portfolio():
-    # Reverse map: instrumentID → ticker
     ID_TO_TICKER = {
         1001: 'AAPL', 1003: 'META', 1004: 'MSFT', 1005: 'AMZN',
         1023: 'JPM',  1032: 'UNH',  1046: 'V',    1111: 'TSLA',
         1137: 'NVDA', 6434: 'GOOGL'
     }
-    try:
-        data      = get_portfolio()
-        cash      = get_available_cash(data)
-        raw_pos   = get_open_positions(data)
+    TICKER_TO_ID = {v: k for k, v in ID_TO_TICKER.items()}
 
-        # Normalise positions to what the dashboard expects
+    try:
+        from trading_agent import get_candle_history
+
+        data    = get_portfolio()
+        cash    = get_available_cash(data)
+        raw_pos = get_open_positions(data)
+
+        # Fetch current prices for all open tickers so we can compute real net value
+        open_tickers = list({ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId")) for p in raw_pos if p})
+        current_prices = {}
+        for ticker in open_tickers:
+            iid = TICKER_TO_ID.get(ticker)
+            if not iid:
+                continue
+            candles = get_candle_history(iid, count=2)
+            if candles:
+                current_prices[ticker] = float(candles[-1].get("close", 0))
+
+        # Build normalised positions using real net value
         positions = []
         for p in raw_pos:
-            iid     = p.get("instrumentID") or p.get("instrumentId")
-            ticker  = ID_TO_TICKER.get(iid, f"ID:{iid}")
-            pl      = p.get("unrealizedPnL", {}).get("pnL", 0)
-            invested = float(p.get("amount", 0))
+            iid    = p.get("instrumentID") or p.get("instrumentId")
+            ticker = ID_TO_TICKER.get(iid, f"ID:{iid}")
+            units  = float(p.get("units", 0))
+            price  = current_prices.get(ticker, 0)
+
+            # net_value = what the position is worth right now
+            net_value  = round(units * price, 2) if price else None
+            # cost_basis = what was paid for current units (from eToro's openRate × units)
+            open_rate  = float(p.get("openRate") or 0)
+            cost_basis = round(units * open_rate, 2) if open_rate else float(p.get("amount", 0))
+            # profit = net_value - cost_basis (or fall back to API profit field)
+            profit = round(net_value - cost_basis, 2) if net_value else float(p.get("profit", 0))
+
             positions.append({
-                "positionId":     p.get("positionID"),
+                "positionId":     p.get("positionID") or p.get("positionId"),
                 "instrumentName": ticker,
                 "instrumentId":   iid,
-                "invested":       invested,
-                "profit":         pl,
-                "units":          p.get("units", 0),
-                "openRate":       p.get("openRate"),
+                "invested":       cost_basis,
+                "profit":         profit,
+                "units":          units,
+                "openRate":       open_rate,
+                "currentPrice":   price,
+                "netValue":       net_value,
                 "isBuy":          p.get("isBuy"),
             })
 
-        equity = float(data.get("credit", 0)) + sum(
-            float(p.get("amount", 0)) + float(p.get("unrealizedPnL", {}).get("pnL", 0))
-            for p in raw_pos
-        )
-        # Consolidate multiple orders of same ticker into one row (matches eToro UI)
-        from collections import defaultdict
-        consolidated = {}
-        for p in positions:
-            t = p["instrumentName"]
-            if t not in consolidated:
-                consolidated[t] = dict(p)
-            else:
-                consolidated[t]["invested"] += p["invested"]
-                consolidated[t]["profit"]   += p["profit"]
-                consolidated[t]["units"]    += p["units"]
-        positions = list(consolidated.values())
+        # Total equity = cash + sum of all position net values
+        total_net = sum(p["netValue"] or p["invested"] for p in positions)
+        equity = round(cash + total_net, 2)
 
         return {
-            "cash":          cash,
+            "cash":          round(cash, 2),
             "totalEquity":   equity,
             "positions":     positions,
             "positionCount": len(positions),

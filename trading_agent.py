@@ -156,10 +156,17 @@ def get_open_positions(pnl: dict) -> list[dict]:
     return [p for p in pnl.get("positions", []) if p.get("isBuy") is True]
 
 def get_total_equity(pnl: dict) -> float:
+    """
+    Equity = cash + net value of all positions.
+    Net value = units × openRate + profit (as reported by eToro API).
+    We use amount + profit since amount = cost basis of current units.
+    """
     credit   = float(pnl.get("credit", 0))
-    invested = sum(float(p.get("amount", 0)) for p in pnl.get("positions", []))
-    pl       = sum(float(p.get("profit", 0)) for p in pnl.get("positions", []))
-    return credit + invested + pl
+    net_pos  = sum(
+        float(p.get("amount", 0)) + float(p.get("profit", 0))
+        for p in pnl.get("positions", [])
+    )
+    return credit + net_pos
 
 # ── Market data ───────────────────────────────────────────────────────────────
 
@@ -292,14 +299,18 @@ def ask_claude(pnl: dict, market_data: dict, premarket_brief: str = "") -> dict:
     # Summarise positions for the prompt — include P&L context
     pos_summary = []
     for p in positions:
-        profit = float(p.get("profit", 0))
-        invested = float(p.get("amount", 0))
-        pct = (profit / invested * 100) if invested else 0
+        profit   = float(p.get("profit", 0))
+        amount   = float(p.get("amount", 0))   # cost basis of current units
+        net_val  = amount + profit
+        pct      = (profit / amount * 100) if amount else 0
         pos_summary.append({
-            "ticker":   p.get("instrumentName", "?"),
-            "invested": round(invested, 2),
-            "profit":   round(profit, 2),
-            "pct":      round(pct, 2),
+            "ticker":     p.get("instrumentName", "?"),
+            "cost_basis": round(amount, 2),
+            "net_value":  round(net_val, 2),
+            "profit":     round(profit, 2),
+            "pct":        round(pct, 2),
+            "units":      p.get("units"),
+            "openRate":   p.get("openRate"),
         })
 
     user_msg = f"""
