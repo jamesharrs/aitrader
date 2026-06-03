@@ -27,12 +27,19 @@ ETORO_API_KEY   = os.environ["ETORO_API_KEY"]
 ETORO_USER_KEY  = os.environ["ETORO_USER_KEY"]
 ANTHROPIC_KEY   = os.environ["ANTHROPIC_API_KEY"]
 
-MAX_POSITION_PCT       = 0.10
+MAX_POSITION_PCT       = 0.08   # hard cap: no single position > 8% of equity
+MAX_TICKER_PCT         = 0.25   # hard cap: no single ticker > 25% of equity across all positions
+MIN_CASH_PCT           = 0.20   # hard floor: always keep 20% cash (raised from 15%)
 MIN_TRADE_AMOUNT       = 50
+STOP_LOSS_PCT          = 0.05   # auto-close any position down >5%
+MAX_BUYS_PER_CYCLE     = 1      # max 1 buy per cycle — prevents cash blowout
 RUN_INTERVAL_MARKET    = 900    # 15 min during market hours
 RUN_INTERVAL_OFFHOURS  = 3600   # 60 min outside market hours
 PRICE_MOVE_THRESHOLD   = 0.02   # 2% move triggers immediate cycle
 BRIEF_REFRESH_THRESHOLD = 0.03  # 3% intraday move triggers mid-session brief refresh
+
+# Conviction-based sizing — reduced to preserve cash buffer
+CONVICTION_SIZE = {"high": 0.05, "medium": 0.03, "low": 0.02}  # % of equity
 
 # Pre-market brief cache — only refresh once per trading day
 def _load_brief_cache() -> dict:
@@ -252,29 +259,27 @@ Your response MUST be valid JSON:
   "hold_cash_reason": "Only populate if actions is empty — specific signal you are waiting for"
 }
 
-Portfolio rules (enforced in code — do not exceed):
-- Max 10% of equity per position
-- Min 15% cash buffer at all times
+HARD RULES (enforced in code — violations are blocked automatically):
+- Max 8% of equity per single position
+- Max 25% of equity in any one ticker across all positions combined
+- Min 20% cash buffer at all times — DO NOT recommend buys if cash is near this floor
+- Stop-losses at -5% are auto-executed before you are called — you will not see those positions
+- Max 1 buy per cycle — recommend only your single highest-conviction buy
 - Min trade size $50
-- Only trade tickers present in market data
 
-Decision-making guidance:
-- Use closes_5d to identify trend direction. Rising closes = uptrend, falling = downtrend.
-- Use pct_change_5d: >+3% over 5 days is momentum; <-3% may be mean-reversion opportunity.
-- Use volume_ratio: >1.2 with rising price = confirmed momentum; >1.2 with falling = distribution.
-- momentum strategy: buy stocks with >+2% 5d change AND volume_ratio > 1.0
-- mean_reversion strategy: buy stocks down >3% over 5d with no fundamental deterioration
-- defensive strategy: hold cash or stable names (JPM, UNH, V) when risk_level is high
-- hold strategy: ONLY use when there is genuinely no actionable signal — not as default
+DECISION FRAMEWORK:
+- Use closes_5d to identify trend: rising = uptrend, falling = downtrend
+- pct_change_5d > +3%: momentum candidate (buy if volume_ratio > 1.0)
+- pct_change_5d < -3%: mean-reversion candidate (buy only if no fundamental reason for decline)
+- volume_ratio > 1.2 with rising price = confirmed momentum; with falling price = distribution (avoid/close)
+- Prefer CLOSING losing or stale positions over buying new ones when cash is below 30%
+- Do NOT re-buy a ticker you just closed in the same session unless conditions have materially changed
 
-IMPORTANT — Opportunity cost of inaction:
-Holding cash is a deliberate choice with an opportunity cost, not a safe default.
-If you return empty actions, you MUST populate hold_cash_reason with a SPECIFIC signal
-you are waiting for (e.g. "waiting for NVDA to confirm breakout above $950 on volume").
-If the portfolio has held >60% cash for multiple consecutive cycles with no action,
-that is a failure mode — find an opportunity or explain precisely what would change.
-
-If market data is present and prices are available, markets are open. You CAN trade.
+IMPORTANT — Cash discipline:
+The portfolio has previously blown through its cash buffer by over-trading. 
+Preserving 20%+ cash is a primary objective — it enables you to act on real opportunities.
+If cash is below 25%, your default should be to CLOSE a weak position rather than buy.
+Only recommend a buy when you have a genuinely strong signal AND sufficient cash headroom.
 """
 
 
@@ -340,28 +345,61 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
         for p in get_open_positions(pnl)
     }
 
-    for action in decisions.get("actions", []):
-        ticker    = action.get("ticker", "").upper()
-        act_type  = action["action"].lower()
+    # Track per-ticker invested amount for concentration cap
+    ticker_invested = {}
+    for p in get_open_positions(pnl):
+        t = ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId"), "").upper()
+        ticker_invested[t] = ticker_invested.get(t, 0) + float(p.get("amount", 0))
+
+    # Re-fetch live cash so we can check buffer before each buy
+    live_cash = get_available_cash(pnl)
+    buys_this_cycle = 0
+
+    # Process closes first — they free up cash before any buys
+    for action in sorted(decisions.get("actions", []), key=lambda a: 0 if a["action"] in ("close","sell") else 1):
+        ticker   = action.get("ticker", "").upper()
+        act_type = action["action"].lower()
         amount_usd = action.get("amount_usd", 0)
 
         try:
             if act_type == "buy":
-                # Conviction-based position sizing
+                # ── Fix 4: cap buys at 1 per cycle ──
+                if buys_this_cycle >= MAX_BUYS_PER_CYCLE:
+                    log.info(f"Skipping BUY {ticker}: already bought {MAX_BUYS_PER_CYCLE} this cycle")
+                    continue
+
+                # ── Fix 5: conviction-based sizing (reduced) ──
                 confidence = action.get("confidence", "medium")
-                size_pct = {"high": 0.08, "medium": 0.05, "low": 0.03}.get(confidence, 0.05)
-                # If amount_usd specified, use it — but cap by conviction ceiling
+                size_pct = CONVICTION_SIZE.get(confidence, 0.03)
                 conviction_cap = equity * size_pct
                 safe_amount = min(amount_usd or conviction_cap, equity * MAX_POSITION_PCT, conviction_cap)
+
                 if safe_amount < MIN_TRADE_AMOUNT:
                     log.info(f"Skipping BUY {ticker}: ${safe_amount:.2f} below minimum")
                     continue
+
+                # ── Fix 1: pre-buy cash buffer check ──
+                projected_cash = live_cash - safe_amount
+                if equity > 0 and (projected_cash / equity) < MIN_CASH_PCT:
+                    log.info(f"Skipping BUY {ticker}: would leave cash at {projected_cash/equity:.1%} (min {MIN_CASH_PCT:.0%})")
+                    continue
+
+                # ── Fix 2: per-ticker concentration cap ──
+                already_invested = ticker_invested.get(ticker, 0)
+                if equity > 0 and (already_invested + safe_amount) / equity > MAX_TICKER_PCT:
+                    log.info(f"Skipping BUY {ticker}: concentration would reach {(already_invested+safe_amount)/equity:.1%} (max {MAX_TICKER_PCT:.0%})")
+                    continue
+
                 iid = instrument_ids.get(ticker) or get_instrument_id(ticker)
                 if not iid:
                     log.warning(f"Skipping BUY {ticker}: no instrument ID")
                     continue
+
                 result = open_position(iid, safe_amount)
-                results.append({"action": "buy", "ticker": ticker, "amount": safe_amount, "result": result})
+                results.append({"action": "buy", "ticker": ticker, "amount": safe_amount, "confidence": confidence, "result": result})
+                live_cash -= safe_amount
+                ticker_invested[ticker] = already_invested + safe_amount
+                buys_this_cycle += 1
 
             elif act_type in ("sell", "close"):
                 pos = positions_by_ticker.get(ticker)
@@ -371,6 +409,8 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
                 pid = pos.get("positionID") or pos.get("positionId")
                 iid = pos.get("instrumentID") or pos.get("instrumentId") or WATCHLIST.get(ticker)
                 result = close_position(pid, iid)
+                freed = float(pos.get("amount", 0)) + float(pos.get("profit", 0))
+                live_cash += freed
                 results.append({"action": "close", "ticker": ticker, "result": result})
 
         except requests.HTTPError as e:
@@ -383,7 +423,34 @@ def execute_actions(decisions: dict, pnl: dict, equity: float, instrument_ids: d
     return results
 
 
-# ── Decision accuracy tracker ─────────────────────────────────────────────────
+# ── Stop-loss enforcement ─────────────────────────────────────────────────────
+
+def enforce_stop_losses(pnl: dict) -> list[dict]:
+    """
+    Auto-close any position that is down more than STOP_LOSS_PCT.
+    Runs before Claude is called so the portfolio state Claude sees is clean.
+    """
+    ID_TO_TICKER = {v: k for k, v in WATCHLIST.items()}
+    closed = []
+    for p in get_open_positions(pnl):
+        profit   = float(p.get("profit", 0))
+        invested = float(p.get("amount", 0))
+        if invested <= 0:
+            continue
+        pct = profit / invested
+        if pct <= -STOP_LOSS_PCT:
+            ticker = ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId"), "?")
+            pid    = p.get("positionID") or p.get("positionId")
+            iid    = p.get("instrumentID") or p.get("instrumentId") or WATCHLIST.get(ticker)
+            log.warning(f"STOP-LOSS: closing {ticker} at {pct:.1%} (${profit:+.2f})")
+            try:
+                close_position(pid, iid)
+                closed.append({"ticker": ticker, "pct": pct, "profit": profit})
+            except Exception as e:
+                log.error(f"Stop-loss close failed for {ticker}: {e}")
+    return closed
+
+
 
 def init_decision_db():
     """Create SQLite table for tracking decision accuracy."""
@@ -448,6 +515,14 @@ def run_cycle():
         market_data    = get_market_data(instrument_ids)
 
         log.info(f"Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | Market data: {len(market_data)} instruments")
+
+        # ── Fix 3: enforce stop-losses before Claude sees the portfolio ──
+        stop_loss_closes = enforce_stop_losses(pnl)
+        if stop_loss_closes:
+            log.info(f"Stop-losses fired: {stop_loss_closes}")
+            # Re-fetch portfolio so Claude sees the cleaned state
+            pnl  = get_portfolio()
+            cash = get_available_cash(pnl)
 
         # Update outcomes for any prior decisions now that new prices are in
         if market_data:
