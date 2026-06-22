@@ -103,36 +103,50 @@ def portfolio():
 
     try:
         from trading_agent import get_candle_history
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         data    = get_portfolio()
         cash    = get_available_cash(data)
         raw_pos = get_open_positions(data)
 
-        # Fetch current prices for all open tickers so we can compute real net value
-        open_tickers = list({ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId")) for p in raw_pos if p})
+        # Fetch current prices in parallel with a 5s total timeout
+        open_tickers = list({ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId"))
+                              for p in raw_pos if p})
         current_prices = {}
-        for ticker in open_tickers:
+
+        def fetch_price(ticker):
             iid = TICKER_TO_ID.get(ticker)
             if not iid:
-                continue
-            candles = get_candle_history(iid, count=2)
-            if candles:
-                current_prices[ticker] = float(candles[-1].get("close", 0))
+                return ticker, None
+            try:
+                candles = get_candle_history(iid, count=2)
+                if candles:
+                    return ticker, float(candles[-1].get("close", 0))
+            except Exception:
+                pass
+            return ticker, None
 
-        # Build normalised positions using real net value
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futures = {ex.submit(fetch_price, t): t for t in open_tickers if t}
+            for f in as_completed(futures, timeout=8):
+                ticker, price = f.result()
+                if price:
+                    current_prices[ticker] = price
+
+        # Build normalised positions
         positions = []
         for p in raw_pos:
-            iid    = p.get("instrumentID") or p.get("instrumentId")
-            ticker = ID_TO_TICKER.get(iid, f"ID:{iid}")
-            units  = float(p.get("units", 0))
-            price  = current_prices.get(ticker, 0)
+            iid       = p.get("instrumentID") or p.get("instrumentId")
+            ticker    = ID_TO_TICKER.get(iid, f"ID:{iid}")
+            units     = float(p.get("units", 0))
+            open_rate = float(p.get("openRate") or 0)
+            price     = current_prices.get(ticker, 0)
 
-            # net_value = what the position is worth right now
-            net_value  = round(units * price, 2) if price else None
-            # cost_basis = what was paid for current units (from eToro's openRate × units)
-            open_rate  = float(p.get("openRate") or 0)
+            # cost_basis = units × avg open price
             cost_basis = round(units * open_rate, 2) if open_rate else float(p.get("amount", 0))
-            # profit = net_value - cost_basis (or fall back to API profit field)
+            # net_value = units × current price (real market value)
+            net_value  = round(units * price, 2) if price else None
+            # profit: prefer live calculation, fall back to API value
             profit = round(net_value - cost_basis, 2) if net_value else float(p.get("profit", 0))
 
             positions.append({
@@ -143,14 +157,13 @@ def portfolio():
                 "profit":         profit,
                 "units":          units,
                 "openRate":       open_rate,
-                "currentPrice":   price,
+                "currentPrice":   price or None,
                 "netValue":       net_value,
                 "isBuy":          p.get("isBuy"),
             })
 
-        # Total equity = cash + sum of all position net values
         total_net = sum(p["netValue"] or p["invested"] for p in positions)
-        equity = round(cash + total_net, 2)
+        equity    = round(cash + total_net, 2)
 
         return {
             "cash":          round(cash, 2),
