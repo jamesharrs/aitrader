@@ -296,21 +296,31 @@ def ask_claude(pnl: dict, market_data: dict, premarket_brief: str = "") -> dict:
     equity    = get_total_equity(pnl)
     positions = get_open_positions(pnl)
 
-    # Summarise positions for the prompt — include P&L context
-    pos_summary = []
+    # Consolidate positions by ticker for the prompt (each ticker = one summary row)
+    from collections import defaultdict
+    ID_TO_TICKER = {v: k for k, v in WATCHLIST.items()}
+    consolidated = defaultdict(lambda: {"cost_basis": 0, "profit": 0, "units": 0, "n": 0})
     for p in positions:
-        profit   = float(p.get("profit", 0))
-        amount   = float(p.get("amount", 0))   # cost basis of current units
-        net_val  = amount + profit
-        pct      = (profit / amount * 100) if amount else 0
+        iid    = p.get("instrumentID") or p.get("instrumentId")
+        ticker = p.get("instrumentName") or ID_TO_TICKER.get(iid, f"ID:{iid}")
+        consolidated[ticker]["cost_basis"] += float(p.get("amount", 0))
+        consolidated[ticker]["profit"]     += float(p.get("profit", 0))
+        consolidated[ticker]["units"]      += float(p.get("units", 0))
+        consolidated[ticker]["n"]          += 1
+        consolidated[ticker]["openRate"]    = p.get("openRate")  # approx
+
+    pos_summary = []
+    for ticker, v in consolidated.items():
+        net_val = v["cost_basis"] + v["profit"]
+        pct     = (v["profit"] / v["cost_basis"] * 100) if v["cost_basis"] else 0
         pos_summary.append({
-            "ticker":     p.get("instrumentName", "?"),
-            "cost_basis": round(amount, 2),
-            "net_value":  round(net_val, 2),
-            "profit":     round(profit, 2),
-            "pct":        round(pct, 2),
-            "units":      p.get("units"),
-            "openRate":   p.get("openRate"),
+            "ticker":        ticker,
+            "positions":     v["n"],
+            "cost_basis":    round(v["cost_basis"], 2),
+            "net_value":     round(net_val, 2),
+            "profit":        round(v["profit"], 2),
+            "pct":           round(pct, 2),
+            "units":         round(v["units"], 4),
         })
 
     user_msg = f"""
@@ -450,15 +460,15 @@ def enforce_stop_losses(pnl: dict) -> list[dict]:
             continue
         pct = profit / invested
         if pct <= -STOP_LOSS_PCT:
-            ticker = ID_TO_TICKER.get(p.get("instrumentID") or p.get("instrumentId"), "?")
+            iid    = p.get("instrumentID") or p.get("instrumentId")
+            ticker = p.get("instrumentName") or ID_TO_TICKER.get(iid, f"ID:{iid}")
             pid    = p.get("positionID") or p.get("positionId")
-            iid    = p.get("instrumentID") or p.get("instrumentId") or WATCHLIST.get(ticker)
-            log.warning(f"STOP-LOSS: closing {ticker} at {pct:.1%} (${profit:+.2f})")
+            log.warning(f"STOP-LOSS: closing {ticker} pos#{pid} at {pct:.1%} (${profit:+.2f})")
             try:
                 close_position(pid, iid)
-                closed.append({"ticker": ticker, "pct": pct, "profit": profit})
+                closed.append({"ticker": ticker, "positionId": pid, "pct": round(pct*100,1), "profit": profit})
             except Exception as e:
-                log.error(f"Stop-loss close failed for {ticker}: {e}")
+                log.error(f"Stop-loss close failed for {ticker} pos#{pid}: {e}")
     return closed
 
 
