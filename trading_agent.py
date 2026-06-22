@@ -334,7 +334,7 @@ Fields: lastPrice, open, high, low, closes_5d (oldest→newest), pct_change_5d (
 Analyse the trend data carefully before deciding. Return ONLY valid JSON.
 """
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1500,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}]
